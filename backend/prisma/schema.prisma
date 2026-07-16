@@ -1,0 +1,800 @@
+// Prisma Schema — AI Receptionist SaaS Platform
+// Version: 1.4.0
+// Authority: Database Schema Specification (06_Database_Schema.md)
+//
+// Modules covered: Authentication, RBAC, Tenant, Configuration,
+//                  Clinic, Doctor, Patient, Appointment, Conversation, Notification
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  active
+  inactive
+  suspended
+  pending_verification
+
+  @@map("user_status")
+}
+
+enum SessionStatus {
+  active
+  revoked
+  expired
+
+  @@map("session_status")
+}
+
+// ---------------------------------------------------------------------------
+// Tenant
+// ---------------------------------------------------------------------------
+
+model Tenant {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId         String   @unique @default(dbgenerated("'tnt_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  name             String
+  slug             String   @unique
+  status           String   @default("created")
+  timezone         String   @default("UTC")
+  country          String   @default("US")
+  language         String   @default("en")
+  subscriptionPlan String   @default("free") @map("subscription_plan")
+  branding         Json?    @default("{}")
+  metadata         Json?    @default("{}")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
+
+  users          User[]
+  sessions       Session[]
+  configurations Configuration[]
+  clinics        Clinic[]
+  doctors        Doctor[]
+  patients       Patient[]
+  appointments   Appointment[]
+  conversations  Conversation[]
+  notifications  Notification[]
+  calendarConnections CalendarConnection[]
+  aiAuditLogs    AiAuditLog[]
+
+  @@index([status])
+  @@index([slug])
+  @@map("tenants")
+}
+
+// ---------------------------------------------------------------------------
+// User
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId  String   @unique @default(dbgenerated("'usr_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  tenantId  String   @map("tenant_id") @db.Uuid
+  clinicId  String?  @map("clinic_id") @db.Uuid
+
+  email         String    @unique
+  passwordHash  String    @map("password_hash")
+  firstName     String    @map("first_name")
+  lastName      String    @map("last_name")
+  role          String    @default("clinic_owner")
+  status        String    @default("active")
+
+  emailVerified   Boolean   @default(false) @map("email_verified")
+  emailVerifiedAt DateTime? @map("email_verified_at")
+
+  tokenVersion        Int       @default(0)  @map("token_version")
+  failedLoginAttempts Int       @default(0)  @map("failed_login_attempts")
+  lockedUntil         DateTime? @map("locked_until")
+  lastLoginAt         DateTime? @map("last_login_at")
+  passwordChangedAt   DateTime? @map("password_changed_at")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt      @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  tenant  Tenant    @relation(fields: [tenantId], references: [id])
+  clinic  Clinic?   @relation("ClinicStaff", fields: [clinicId], references: [id])
+  ownedClinics Clinic[] @relation("ClinicOwner")
+  sessions Session[]
+  passwordResetTokens PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
+  userRoles UserRole[]
+
+  @@index([email])
+  @@index([tenantId])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Session
+// ---------------------------------------------------------------------------
+
+model Session {
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId   String @map("user_id")   @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  refreshTokenHash String @map("refresh_token_hash")
+
+  userAgent       String  @map("user_agent")
+  ipAddress       String  @map("ip_address")
+  browser         String?
+  operatingSystem String? @map("operating_system")
+  deviceType      String  @default("unknown") @map("device_type")
+
+  status         String   @default("active")
+  lastActivityAt DateTime @default(now()) @map("last_activity_at")
+  expiresAt      DateTime @map("expires_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt      @map("updated_at")
+
+  user   User   @relation(fields: [userId], references: [id])
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([userId])
+  @@index([status])
+  @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Password Reset Token
+// ---------------------------------------------------------------------------
+
+model PasswordResetToken {
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId   String @map("user_id")   @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  used      Boolean  @default(false)
+  usedAt    DateTime? @map("used_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([tokenHash])
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Email Verification Token
+// ---------------------------------------------------------------------------
+
+model EmailVerificationToken {
+  id       String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId   String @map("user_id")   @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  used      Boolean  @default(false)
+  usedAt    DateTime? @map("used_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([tokenHash])
+  @@index([userId])
+  @@map("email_verification_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC — Role
+// ---------------------------------------------------------------------------
+
+model Role {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String? @map("tenant_id") @db.Uuid  // null = system-wide role
+  name        String
+  displayName String  @map("display_name")
+  description String?
+  isSystem    Boolean @default(false) @map("is_system") // system roles cannot be deleted
+  isActive    Boolean @default(true)  @map("is_active")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt      @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@index([isSystem])
+  @@map("roles")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC — Permission
+// ---------------------------------------------------------------------------
+
+model Permission {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String  @unique                        // e.g. "appointment.create"
+  displayName String  @map("display_name")
+  description String?
+  resource    String                                 // e.g. "appointment"
+  action      String                                 // e.g. "create"
+  isActive    Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt      @map("updated_at")
+
+  rolePermissions RolePermission[]
+
+  @@index([resource])
+  @@index([name])
+  @@map("permissions")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC — Role ↔ Permission (join table)
+// ---------------------------------------------------------------------------
+
+model RolePermission {
+  id           String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roleId       String @map("role_id")       @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  grantedAt DateTime @default(now()) @map("granted_at")
+  grantedBy String?  @map("granted_by") @db.Uuid      // userId who granted
+
+  role       Role       @relation(fields: [roleId],       references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC — User ↔ Role assignment
+// ---------------------------------------------------------------------------
+
+model UserRole {
+  id       String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId   String  @map("user_id")   @db.Uuid
+  roleId   String  @map("role_id")   @db.Uuid
+  tenantId String  @map("tenant_id") @db.Uuid
+  clinicId String? @map("clinic_id") @db.Uuid   // scope to clinic when applicable
+
+  assignedAt DateTime  @default(now()) @map("assigned_at")
+  assignedBy String?   @map("assigned_by") @db.Uuid  // userId who assigned
+  expiresAt  DateTime? @map("expires_at")             // optional time-bound roles
+  revokedAt  DateTime? @map("revoked_at")
+  isActive   Boolean   @default(true) @map("is_active")
+
+  user User @relation(fields: [userId], references: [id])
+  role Role @relation(fields: [roleId], references: [id])
+
+  @@unique([userId, roleId, tenantId])
+  @@index([userId])
+  @@index([roleId])
+  @@index([tenantId])
+  @@map("user_roles")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC — Audit Log (immutable)
+// ---------------------------------------------------------------------------
+
+model RbacAuditLog {
+  id         String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String? @map("tenant_id") @db.Uuid
+  userId     String? @map("user_id")   @db.Uuid
+  clinicId   String? @map("clinic_id") @db.Uuid
+  actorId    String? @map("actor_id")  @db.Uuid   // who performed the action
+
+  eventType  String  @map("event_type")             // e.g. "rbac.role.created"
+  resource   String?                                // resource being accessed
+  permission String?                                // permission being checked
+  roleId     String? @map("role_id")   @db.Uuid
+  roleName   String? @map("role_name")
+
+  outcome    String  @default("unknown")            // "granted" | "denied"
+  requestId  String? @map("request_id")
+  ipAddress  String? @map("ip_address")
+  metadata   Json?                                  // arbitrary additional context
+
+  occurredAt DateTime @default(now()) @map("occurred_at")
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([eventType])
+  @@index([occurredAt])
+  @@map("rbac_audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+model Configuration {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId            String    @map("tenant_id") @db.Uuid
+  clinicId            String?   @map("clinic_id") @db.Uuid
+  version             Int       @default(1)
+  isActive            Boolean   @default(true) @map("is_active")
+  
+  // Versioning and Audit
+  createdBy           String    @map("created_by") @db.Uuid
+  createdAt           DateTime  @default(now()) @map("created_at")
+  changeSummary       String?   @map("change_summary")
+  previousVersionId   String?   @map("previous_version_id") @db.Uuid
+  rollbackFromVersion Int?      @map("rollback_from_version")
+  
+  // Settings Categories (JSON)
+  business            Json      @default("{}")
+  voice               Json      @default("{}")
+  ai                  Json      @default("{}")
+  calendar            Json      @default("{}")
+  notification        Json      @default("{}")
+  branding            Json      @default("{}")
+  localization        Json      @default("{}")
+  featureFlags        Json      @map("feature_flags") @default("{}")
+  providers           Json      @default("{}")
+
+  tenant              Tenant    @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, clinicId, version])
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([isActive])
+  @@map("configurations")
+}
+
+// ---------------------------------------------------------------------------
+// Clinic
+// ---------------------------------------------------------------------------
+
+model Clinic {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId         String   @unique @default(dbgenerated("'clnc_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  tenantId         String   @map("tenant_id") @db.Uuid
+  ownerId          String   @map("owner_id") @db.Uuid
+  
+  name             String
+  legalName        String?  @map("legal_name")
+  slug             String   @unique
+  timezone         String
+  country          String
+  status           String   @default("pending_setup")
+  
+  // Contact
+  primaryEmail     String?  @map("primary_email")
+  primaryPhone     String?  @map("primary_phone")
+  website          String?
+  address          String?
+  city             String?
+  state            String?
+  postalCode       String?  @map("postal_code")
+  
+  // Branding
+  logoReference    String?  @map("logo_reference")
+  brandIdentifier  String?  @map("brand_identifier")
+  
+  // Subscription
+  subscriptionId   String?  @map("subscription_id")
+  planId           String?  @map("plan_id")
+  subscriptionStatus String? @map("subscription_status")
+
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt      @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+  owner         User           @relation("ClinicOwner", fields: [ownerId], references: [id])
+  staff         User[]         @relation("ClinicStaff")
+  doctors       Doctor[]
+  patients      Patient[]
+  appointments  Appointment[]
+  conversations Conversation[]
+  notifications Notification[]
+  calendarConnections CalendarConnection[]
+
+  @@index([tenantId])
+  @@index([ownerId])
+  @@index([status])
+  @@index([slug])
+  @@map("clinics")
+}
+
+// ---------------------------------------------------------------------------
+// Doctor
+// ---------------------------------------------------------------------------
+
+model Doctor {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId        String    @unique @default(dbgenerated("'dctr_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  tenantId        String    @map("tenant_id") @db.Uuid
+  clinicId        String    @map("clinic_id") @db.Uuid
+
+  fullName        String    @map("full_name")
+  displayName     String    @map("display_name")
+  specialization  String
+  licenseNumber   String?   @map("license_number")
+  biography       String?
+  email           String?
+  phone           String?
+  status          String    @default("active")
+  profilePhoto    String?   @map("profile_photo")
+
+  workingHours    Json      @map("working_hours") @default("[]")
+  leaves          Json      @map("leaves") @default("[]")
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt      @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+  clinic        Clinic         @relation(fields: [clinicId], references: [id])
+  appointments  Appointment[]
+  conversations Conversation[]
+  calendarConnections CalendarConnection[]
+
+  @@unique([tenantId, licenseNumber])
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([status])
+  @@index([displayName])
+  @@index([specialization])
+  @@map("doctors")
+}
+
+// ---------------------------------------------------------------------------
+// Patient
+// ---------------------------------------------------------------------------
+
+model Patient {
+  id                     String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId               String    @unique @default(dbgenerated("'pat_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  tenantId               String    @map("tenant_id") @db.Uuid
+  clinicId               String    @map("clinic_id") @db.Uuid
+
+  fullName               String    @map("full_name")
+  phone                  String
+  email                  String?
+  dateOfBirth            DateTime? @map("date_of_birth")
+  gender                 String?
+  preferredLanguage      String    @default("en") @map("preferred_language")
+  preferredContactMethod String    @default("sms") @map("preferred_contact_method")
+  status                 String    @default("active")
+  emergencyContact       Json?     @map("emergency_contact")
+  smsEnabled             Boolean   @default(true) @map("sms_enabled")
+  emailEnabled           Boolean   @default(true) @map("email_enabled")
+
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt      @map("updated_at")
+  deletedAt              DateTime? @map("deleted_at")
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+  clinic        Clinic         @relation(fields: [clinicId], references: [id])
+  appointments  Appointment[]
+  conversations Conversation[]
+  notifications Notification[]
+
+  @@unique([clinicId, phone])
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([status])
+  @@index([fullName])
+  @@index([phone])
+  @@map("patients")
+}
+
+// ---------------------------------------------------------------------------
+// Appointment
+// ---------------------------------------------------------------------------
+
+model Appointment {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId           String    @unique @default(dbgenerated("'appt_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  tenantId           String    @map("tenant_id") @db.Uuid
+  clinicId           String    @map("clinic_id") @db.Uuid
+  doctorId           String    @map("doctor_id") @db.Uuid
+  patientId          String    @map("patient_id") @db.Uuid
+
+  startTime          DateTime  @map("start_time")
+  endTime            DateTime  @map("end_time")
+  timezone           String    @default("UTC")
+  status             String    @default("pending")
+  source             String    @default("dashboard")
+
+  notes              String?   @map("notes")
+  cancellationReason String?   @map("cancellation_reason")
+  cancelledAt        DateTime? @map("cancelled_at")
+
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt      @map("updated_at")
+  deletedAt          DateTime? @map("deleted_at")
+
+  tenant        Tenant         @relation(fields: [tenantId],  references: [id])
+  clinic        Clinic         @relation(fields: [clinicId],  references: [id])
+  doctor        Doctor         @relation(fields: [doctorId],  references: [id])
+  patient       Patient        @relation(fields: [patientId], references: [id])
+  conversations Conversation[]
+  notifications Notification[]
+  calendarEventMappings CalendarEventMapping[]
+
+  // Scalar indexes
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([doctorId])
+  @@index([patientId])
+  @@index([startTime])
+  @@index([status])
+  @@index([publicId])
+  // Composite indexes for scheduling queries
+  @@index([doctorId, startTime])
+  @@index([clinicId, startTime])
+  @@index([patientId, startTime])
+  @@map("appointments")
+}
+
+// ---------------------------------------------------------------------------
+// Conversation
+// ---------------------------------------------------------------------------
+
+model Conversation {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId            String    @unique @default(dbgenerated("'conv_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  tenantId            String    @map("tenant_id") @db.Uuid
+  clinicId            String    @map("clinic_id") @db.Uuid
+  patientId           String?   @map("patient_id") @db.Uuid
+  doctorId            String?   @map("doctor_id") @db.Uuid
+  appointmentId       String?   @map("appointment_id") @db.Uuid
+
+  // Call session identity
+  callSessionId       String    @map("call_session_id")
+  callerPhone         String?   @map("caller_phone")
+
+  // Timing
+  startedAt           DateTime  @map("started_at")
+  endedAt             DateTime? @map("ended_at")
+  durationSeconds     Int?      @map("duration_seconds")
+
+  // Lifecycle
+  status              String    @default("initiated")
+  language            String    @default("en")
+
+  // Transcript (array of transcript turn objects stored as JSON)
+  transcript          Json      @default("[]")
+  transcriptVersion   Int       @default(0) @map("transcript_version")
+
+  // AI output
+  summary             Json?     @map("summary")
+  extractedEntities   Json?     @map("extracted_entities")
+  intent              String?
+  sentiment           String?
+
+  // Recording reference (metadata only, not the file)
+  recordingReference  String?   @map("recording_reference")
+  recordingProvider   String?   @map("recording_provider")
+  recordingStatus     String?   @map("recording_status")
+
+  // Token / cost tracking
+  inputTokens         Int?      @map("input_tokens")
+  outputTokens        Int?      @map("output_tokens")
+  totalTokens         Int?      @map("total_tokens")
+  estimatedCostUsd    Decimal?  @map("estimated_cost_usd") @db.Decimal(10, 6)
+  aiModel             String?   @map("ai_model")
+  aiProvider          String?   @map("ai_provider")
+
+  // Arbitrary metadata
+  metadata            Json?     @default("{}")
+
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt      @map("updated_at")
+  deletedAt           DateTime? @map("deleted_at")
+
+  tenant        Tenant         @relation(fields: [tenantId],      references: [id])
+  clinic        Clinic         @relation(fields: [clinicId],      references: [id])
+  patient       Patient?       @relation(fields: [patientId],     references: [id])
+  doctor        Doctor?        @relation(fields: [doctorId],      references: [id])
+  appointment   Appointment?   @relation(fields: [appointmentId], references: [id])
+  notifications Notification[]
+  aiAuditLogs   AiAuditLog[]
+
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([appointmentId])
+  @@index([callSessionId])
+  @@index([startedAt])
+  @@index([status])
+  @@index([intent])
+  @@index([publicId])
+  @@map("conversations")
+}
+
+// ---------------------------------------------------------------------------
+// Notification
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId         String    @unique @default(dbgenerated("'ntf_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  tenantId         String    @map("tenant_id") @db.Uuid
+  clinicId         String    @map("clinic_id") @db.Uuid
+  patientId        String?   @map("patient_id") @db.Uuid
+  appointmentId    String?   @map("appointment_id") @db.Uuid
+  conversationId   String?   @map("conversation_id") @db.Uuid
+
+  recipient        String
+  channel          String    // "sms" | "email"
+  type             String    // "appointment_confirmation", "appointment_reminder", etc.
+  subject          String?
+  content          String
+
+  status           String    @default("pending") // "pending" | "queued" | "sending" | "sent" | "delivered" | "failed" | "cancelled" | "expired"
+  provider         String?   // "smtp" | "twilio_sms" | "mock"
+  retryCount       Int       @default(0) @map("retry_count")
+  maxRetries       Int       @default(3) @map("max_retries")
+  failureReason    String?   @map("failure_reason")
+
+  scheduledAt      DateTime? @map("scheduled_at")
+  sentAt           DateTime? @map("sent_at")
+  deliveredAt      DateTime? @map("delivered_at")
+  failedAt         DateTime? @map("failed_at")
+
+  variables        Json?     @default("{}")
+  metadata         Json?     @default("{}")
+
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt      @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
+
+  tenant       Tenant        @relation(fields: [tenantId],      references: [id])
+  clinic       Clinic        @relation(fields: [clinicId],      references: [id])
+  patient      Patient?      @relation(fields: [patientId],     references: [id])
+  appointment  Appointment?  @relation(fields: [appointmentId], references: [id])
+  conversation Conversation? @relation(fields: [conversationId], references: [id])
+
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([patientId])
+  @@index([status])
+  @@index([channel])
+  @@index([type])
+  @@index([createdAt])
+  @@index([scheduledAt])
+  @@index([publicId])
+  @@map("notifications")
+}
+
+// ---------------------------------------------------------------------------
+// Calendar Connection
+// ---------------------------------------------------------------------------
+
+model CalendarConnection {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId         String    @unique @default(dbgenerated("'cal_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  tenantId         String    @map("tenant_id") @db.Uuid
+  clinicId         String    @map("clinic_id") @db.Uuid
+  doctorId         String?   @map("doctor_id") @db.Uuid
+
+  provider         String    // "google" | "outlook"
+  calendarId       String?   @map("calendar_id")
+  connectionStatus String    @default("pending") @map("connection_status")
+  lastSyncTime     DateTime? @map("last_sync_time")
+
+  // Encrypted OAuth credentials
+  accessToken      String    @map("access_token") @db.Text
+  refreshToken     String?   @map("refresh_token") @db.Text
+  tokenExpiry      DateTime? @map("token_expiry")
+
+  // Incremental sync token
+  syncToken        String?   @map("sync_token")
+
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt      @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
+
+  tenant   Tenant                 @relation(fields: [tenantId], references: [id])
+  clinic   Clinic                 @relation(fields: [clinicId], references: [id])
+  doctor   Doctor?                @relation(fields: [doctorId], references: [id])
+  mappings CalendarEventMapping[]
+  logs     CalendarSyncLog[]
+
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([doctorId])
+  @@index([provider])
+  @@index([connectionStatus])
+  @@index([lastSyncTime])
+  @@index([publicId])
+  @@map("calendar_connections")
+}
+
+// ---------------------------------------------------------------------------
+// Calendar Event Mapping
+// ---------------------------------------------------------------------------
+
+model CalendarEventMapping {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId             String   @map("tenant_id") @db.Uuid
+  clinicId             String   @map("clinic_id") @db.Uuid
+  calendarConnectionId String   @map("calendar_connection_id") @db.Uuid
+  appointmentId        String   @map("appointment_id") @db.Uuid
+  externalEventId      String   @map("external_event_id")
+
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt      @map("updated_at")
+
+  connection  CalendarConnection @relation(fields: [calendarConnectionId], references: [id], onDelete: Cascade)
+  appointment Appointment        @relation(fields: [appointmentId],        references: [id], onDelete: Cascade)
+
+  @@unique([calendarConnectionId, appointmentId])
+  @@unique([calendarConnectionId, externalEventId])
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([appointmentId])
+  @@map("calendar_event_mappings")
+}
+
+// ---------------------------------------------------------------------------
+// Calendar Sync Log
+// ---------------------------------------------------------------------------
+
+model CalendarSyncLog {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId             String   @map("tenant_id") @db.Uuid
+  clinicId             String   @map("clinic_id") @db.Uuid
+  calendarConnectionId String   @map("calendar_connection_id") @db.Uuid
+  direction            String   // "push" | "pull"
+  status               String   // "success" | "failed"
+  appointmentId        String?  @map("appointment_id") @db.Uuid
+  details              String?  @db.Text
+  errorDetails         String?  @map("error_details") @db.Text
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  connection CalendarConnection @relation(fields: [calendarConnectionId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([calendarConnectionId])
+  @@index([createdAt])
+  @@map("calendar_sync_logs")
+}
+
+// ---------------------------------------------------------------------------
+// AI Engine Audit Log
+// ---------------------------------------------------------------------------
+
+model AiAuditLog {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  clinicId       String?  @map("clinic_id") @db.Uuid
+  conversationId String   @map("conversation_id") @db.Uuid
+  provider       String
+  eventType      String   @map("event_type")
+  requestId      String?  @map("request_id")
+  metadata       Json?    @default("{}")
+  occurredAt     DateTime @default(now()) @map("occurred_at")
+
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+
+  @@index([tenantId])
+  @@index([conversationId])
+  @@index([eventType])
+  @@index([occurredAt])
+  @@map("ai_audit_logs")
+}
