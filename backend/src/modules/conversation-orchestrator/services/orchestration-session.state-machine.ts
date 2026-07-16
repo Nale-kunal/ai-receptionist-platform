@@ -1,0 +1,91 @@
+import {
+  type OrchestrationState,
+  ORCHESTRATION_STATE_CREATED,
+  ORCHESTRATION_STATE_INITIALIZING,
+  ORCHESTRATION_STATE_GREETING,
+  ORCHESTRATION_STATE_LISTENING,
+  ORCHESTRATION_STATE_PROCESSING,
+  ORCHESTRATION_STATE_RESPONDING,
+  ORCHESTRATION_STATE_WAITING,
+  ORCHESTRATION_STATE_INTERRUPTED,
+  ORCHESTRATION_STATE_RESUMED,
+  ORCHESTRATION_STATE_ENDING,
+  ORCHESTRATION_STATE_COMPLETED,
+  ORCHESTRATION_STATE_FAILED,
+} from '../constants/conversation-orchestrator.constants';
+import { OrchestratorInvalidStateTransitionError } from '../errors/conversation-orchestrator.errors';
+
+export class OrchestrationSessionStateMachine {
+  private static readonly VALID_TRANSITIONS: Record<OrchestrationState, Set<OrchestrationState>> = {
+    [ORCHESTRATION_STATE_CREATED]: new Set([
+      ORCHESTRATION_STATE_INITIALIZING,
+      ORCHESTRATION_STATE_FAILED,
+      ORCHESTRATION_STATE_ENDING,
+    ]),
+    [ORCHESTRATION_STATE_INITIALIZING]: new Set([
+      ORCHESTRATION_STATE_GREETING,
+      ORCHESTRATION_STATE_FAILED,
+      ORCHESTRATION_STATE_ENDING,
+    ]),
+    [ORCHESTRATION_STATE_GREETING]: new Set([
+      ORCHESTRATION_STATE_LISTENING,
+      ORCHESTRATION_STATE_FAILED,
+      ORCHESTRATION_STATE_ENDING,
+    ]),
+    [ORCHESTRATION_STATE_LISTENING]: new Set([
+      ORCHESTRATION_STATE_PROCESSING,
+      ORCHESTRATION_STATE_FAILED,
+      ORCHESTRATION_STATE_ENDING,
+    ]),
+    [ORCHESTRATION_STATE_PROCESSING]: new Set([
+      ORCHESTRATION_STATE_RESPONDING,
+      ORCHESTRATION_STATE_FAILED,
+      ORCHESTRATION_STATE_ENDING,
+    ]),
+    [ORCHESTRATION_STATE_RESPONDING]: new Set([
+      ORCHESTRATION_STATE_WAITING,
+      ORCHESTRATION_STATE_INTERRUPTED,
+      ORCHESTRATION_STATE_LISTENING,
+      ORCHESTRATION_STATE_FAILED,
+      ORCHESTRATION_STATE_ENDING,
+    ]),
+    [ORCHESTRATION_STATE_WAITING]: new Set([
+      ORCHESTRATION_STATE_LISTENING,
+      ORCHESTRATION_STATE_PROCESSING,
+      ORCHESTRATION_STATE_FAILED,
+      ORCHESTRATION_STATE_ENDING,
+    ]),
+    [ORCHESTRATION_STATE_INTERRUPTED]: new Set([
+      ORCHESTRATION_STATE_RESUMED,
+      ORCHESTRATION_STATE_FAILED,
+      ORCHESTRATION_STATE_ENDING,
+    ]),
+    [ORCHESTRATION_STATE_RESUMED]: new Set([
+      ORCHESTRATION_STATE_LISTENING,
+      ORCHESTRATION_STATE_PROCESSING,
+      ORCHESTRATION_STATE_FAILED,
+      ORCHESTRATION_STATE_ENDING,
+    ]),
+    [ORCHESTRATION_STATE_ENDING]: new Set([
+      ORCHESTRATION_STATE_COMPLETED,
+      ORCHESTRATION_STATE_FAILED,
+    ]),
+    [ORCHESTRATION_STATE_COMPLETED]: new Set(),  // Terminal
+    [ORCHESTRATION_STATE_FAILED]: new Set(),     // Terminal
+  };
+
+  public static validateTransition(currentState: OrchestrationState, targetState: OrchestrationState): void {
+    if (currentState === targetState) {
+      return; // No-op
+    }
+
+    const allowed = this.VALID_TRANSITIONS[currentState];
+    if (!allowed || !allowed.has(targetState)) {
+      throw new OrchestratorInvalidStateTransitionError(currentState, targetState);
+    }
+  }
+
+  public static isTerminal(state: OrchestrationState): boolean {
+    return state === ORCHESTRATION_STATE_COMPLETED || state === ORCHESTRATION_STATE_FAILED;
+  }
+}
