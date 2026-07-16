@@ -12,6 +12,7 @@ import type {
 } from '../interfaces/ai-engine.interfaces';
 import type { IConversationService } from '../../conversation/interfaces/conversation.interfaces';
 import type { IConfigurationService } from '../../configuration/interfaces/configuration.interfaces';
+import type { IPromptEngineService } from '../../prompt-engine/interfaces/prompt-engine.interfaces';
 import type {
   AiMessage,
   AiToolDefinition,
@@ -46,6 +47,8 @@ export class AiEngineService implements IAiEngineService {
     private readonly providerFactory: AiProviderFactory,
     private readonly auditLogRepository: IAiAuditLogRepository,
     private readonly publisher: IAiEngineEventPublisher,
+    /** Optional — when provided, system prompt is sourced from Prompt Engine instead of inline builder */
+    private readonly promptEngineService?: IPromptEngineService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -106,7 +109,50 @@ export class AiEngineService implements IAiEngineService {
       },
     });
 
-    // Log configuration prompt version
+    // 3. Build Conversation History
+    const history: AiMessage[] = [];
+
+    // System instruction prompt — delegate to Prompt Engine when available
+    let systemPromptContent: string;
+    let promptVersion: number | null = null;
+    let promptId: string | null = null;
+
+    if (this.promptEngineService) {
+      try {
+        const composed = await this.promptEngineService.composeSystemPrompt({
+          tenantId,
+          clinicId,
+          variables: {
+            clinic_name:          (config.branding?.clinicName as string)         ?? '',
+            timezone:             (config.localization?.timezone as string)        ?? 'UTC',
+            language:             (config.localization?.language as string)        ?? 'en',
+            business_hours:       JSON.stringify(config.business?.businessHours   ?? []),
+            clinic_phone:         (config.branding?.primaryPhone as string)        ?? '',
+            clinic_email:         (config.branding?.primaryEmail as string)        ?? '',
+            clinic_address:       (config.branding?.address as string)             ?? '',
+            clinic_website:       (config.branding?.website as string)             ?? '',
+            appointment_duration: String(config.business?.appointmentDuration ?? 30),
+            greeting_message:     (config.voice?.greeting as string)               ?? '',
+            supported_languages:  (config.localization?.language as string)        ?? 'en',
+            today:                new Date().toISOString().split('T')[0]!,
+            current_time:         new Date().toTimeString().split(' ')[0]!,
+          },
+          requestId,
+        });
+        systemPromptContent = composed.content;
+        promptVersion       = composed.promptVersion;
+        promptId            = composed.promptId;
+      } catch {
+        // Graceful fallback to inline builder if Prompt Engine fails
+        systemPromptContent = this.buildSystemPrompt(config);
+      }
+    } else {
+      systemPromptContent = this.buildSystemPrompt(config);
+    }
+
+    history.push({ role: 'system', content: systemPromptContent });
+
+    // Log configuration prompt version (after prompt composition so version IDs are available)
     await this.logAudit({
       tenantId,
       clinicId,
@@ -114,7 +160,7 @@ export class AiEngineService implements IAiEngineService {
       provider: providerName,
       eventType: EVENT_AI_PROMPT_VERSION_USED,
       requestId,
-      metadata: { version: config.version },
+      metadata: { version: config.version, promptId, promptVersion },
     });
     await this.publisher.publish({
       type: EVENT_AI_PROMPT_VERSION_USED,
@@ -122,18 +168,11 @@ export class AiEngineService implements IAiEngineService {
         tenantId,
         clinicId,
         conversationId,
-        promptVersion: config.version,
+        promptVersion: promptVersion ?? config.version,
         requestId,
         occurredAt: new Date(),
       },
     });
-
-    // 3. Build Conversation History
-    const history: AiMessage[] = [];
-
-    // System instruction prompt
-    const systemPrompt = this.buildSystemPrompt(config);
-    history.push({ role: 'system', content: systemPrompt });
 
     // Load past turns
     for (const turn of conversation.transcript) {

@@ -66,6 +66,8 @@ model Tenant {
   notifications  Notification[]
   calendarConnections CalendarConnection[]
   aiAuditLogs    AiAuditLog[]
+  promptTemplates PromptTemplate[]
+  promptAuditLogs PromptAuditLog[]
 
   @@index([status])
   @@index([slug])
@@ -407,6 +409,8 @@ model Clinic {
   conversations Conversation[]
   notifications Notification[]
   calendarConnections CalendarConnection[]
+  promptTemplates PromptTemplate[]
+  promptAuditLogs PromptAuditLog[]
 
   @@index([tenantId])
   @@index([ownerId])
@@ -797,4 +801,74 @@ model AiAuditLog {
   @@index([eventType])
   @@index([occurredAt])
   @@map("ai_audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Prompt Engine — Prompt Template (versioned, immutable history)
+// ---------------------------------------------------------------------------
+
+model PromptTemplate {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId            String    @unique @default(dbgenerated("'prmp_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  tenantId            String    @map("tenant_id") @db.Uuid
+  clinicId            String?   @map("clinic_id") @db.Uuid
+
+  promptType          String    @map("prompt_type")   // 'system' | 'greeting' | 'fallback' | ...
+  version             Int       @default(1)
+  status              String    @default("draft")     // 'draft' | 'published' | 'archived' | 'deprecated'
+
+  content             String    @db.Text
+  variables           Json      @default("[]")         // declared variable names ["clinic_name", ...]
+  hash                String                           // SHA-256 of content for integrity verification
+  changeSummary       String?   @map("change_summary")
+  authorId            String    @map("author_id") @db.Uuid
+
+  publishedAt         DateTime? @map("published_at")
+  previousVersionId   String?   @map("previous_version_id") @db.Uuid
+  rollbackFromVersion Int?      @map("rollback_from_version")
+
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt      @map("updated_at")
+
+  tenant              Tenant    @relation(fields: [tenantId], references: [id])
+  clinic              Clinic?   @relation(fields: [clinicId], references: [id])
+  previousVersion     PromptTemplate?  @relation("PromptVersionHistory", fields: [previousVersionId], references: [id])
+  nextVersions        PromptTemplate[] @relation("PromptVersionHistory")
+  auditLogs           PromptAuditLog[]
+
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([tenantId, clinicId, promptType, status])
+  @@index([tenantId, clinicId, promptType, version])
+  @@index([status])
+  @@map("prompt_templates")
+}
+
+// ---------------------------------------------------------------------------
+// Prompt Engine — Prompt Audit Log (immutable lifecycle record)
+// ---------------------------------------------------------------------------
+
+model PromptAuditLog {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  clinicId       String?  @map("clinic_id") @db.Uuid
+  promptId       String   @map("prompt_id") @db.Uuid
+  promptType     String   @map("prompt_type")
+  promptVersion  Int      @map("prompt_version")
+  eventType      String   @map("event_type")  // 'created' | 'published' | 'archived' | 'rolled_back' | ...
+  actorId        String   @map("actor_id")
+  requestId      String?  @map("request_id")
+  metadata       Json?    @default("{}")
+  occurredAt     DateTime @default(now()) @map("occurred_at")
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id])
+  clinic  Clinic?        @relation(fields: [clinicId], references: [id])
+  prompt  PromptTemplate @relation(fields: [promptId], references: [id])
+
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([promptId])
+  @@index([eventType])
+  @@index([occurredAt])
+  @@map("prompt_audit_logs")
 }
