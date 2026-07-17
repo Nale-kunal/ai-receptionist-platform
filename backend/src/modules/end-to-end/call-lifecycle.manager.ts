@@ -1,0 +1,146 @@
+/**
+ * End-to-End Call Flow — Lifecycle Manager
+ */
+
+import type { E2eCallState } from './end-to-end.constants';
+import { E2eInvalidStateTransitionError } from './end-to-end.errors';
+import {
+  E2E_STATE_INCOMING_CALL,
+  E2E_STATE_WEBHOOK_VALIDATED,
+  E2E_STATE_VOICE_SESSION_CREATED,
+  E2E_STATE_REALTIME_SESSION_CREATED,
+  E2E_STATE_CONVERSATION_CREATED,
+  E2E_STATE_PROMPT_RESOLVED,
+  E2E_STATE_AI_READY,
+  E2E_STATE_GREETING,
+  E2E_STATE_LISTENING,
+  E2E_STATE_PROCESSING,
+  E2E_STATE_TOOL_EXECUTION,
+  E2E_STATE_RESPONDING,
+  E2E_STATE_WAITING,
+  E2E_STATE_INTERRUPTED,
+  E2E_STATE_RESUMED,
+  E2E_STATE_ENDING,
+  E2E_STATE_CALL_COMPLETED,
+  E2E_STATE_RESOURCE_CLEANUP,
+  E2E_STATE_TERMINATED,
+} from './end-to-end.constants';
+
+export class CallLifecycleManager {
+  private static readonly VALID_TRANSITIONS: Record<E2eCallState, Set<E2eCallState>> = {
+    [E2E_STATE_INCOMING_CALL]: new Set([
+      E2E_STATE_WEBHOOK_VALIDATED,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_WEBHOOK_VALIDATED]: new Set([
+      E2E_STATE_VOICE_SESSION_CREATED,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_VOICE_SESSION_CREATED]: new Set([
+      E2E_STATE_REALTIME_SESSION_CREATED,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_REALTIME_SESSION_CREATED]: new Set([
+      E2E_STATE_CONVERSATION_CREATED,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_CONVERSATION_CREATED]: new Set([
+      E2E_STATE_PROMPT_RESOLVED,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_PROMPT_RESOLVED]: new Set([
+      E2E_STATE_AI_READY,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_AI_READY]: new Set([
+      E2E_STATE_GREETING,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_GREETING]: new Set([
+      E2E_STATE_LISTENING,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_LISTENING]: new Set([
+      E2E_STATE_PROCESSING,
+      E2E_STATE_INTERRUPTED,
+      E2E_STATE_ENDING,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_PROCESSING]: new Set([
+      E2E_STATE_TOOL_EXECUTION,
+      E2E_STATE_RESPONDING,
+      E2E_STATE_INTERRUPTED,
+      E2E_STATE_ENDING,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_TOOL_EXECUTION]: new Set([
+      E2E_STATE_RESPONDING,
+      E2E_STATE_INTERRUPTED,
+      E2E_STATE_ENDING,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_RESPONDING]: new Set([
+      E2E_STATE_WAITING,
+      E2E_STATE_INTERRUPTED,
+      E2E_STATE_ENDING,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_WAITING]: new Set([
+      E2E_STATE_LISTENING,
+      E2E_STATE_INTERRUPTED,
+      E2E_STATE_ENDING,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_INTERRUPTED]: new Set([
+      E2E_STATE_RESUMED,
+      E2E_STATE_ENDING,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_RESUMED]: new Set([
+      E2E_STATE_LISTENING,
+      E2E_STATE_ENDING,
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_ENDING]: new Set([
+      E2E_STATE_CALL_COMPLETED,
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_CALL_COMPLETED]: new Set([
+      E2E_STATE_RESOURCE_CLEANUP,
+    ]),
+    [E2E_STATE_RESOURCE_CLEANUP]: new Set([
+      E2E_STATE_TERMINATED,
+    ]),
+    [E2E_STATE_TERMINATED]: new Set(), // Terminal
+  };
+
+  public static validateTransition(current: E2eCallState, target: E2eCallState): void {
+    if (current === target) {
+      return; // No-op
+    }
+
+    const allowed = this.VALID_TRANSITIONS[current];
+    if (!allowed || !allowed.has(target)) {
+      throw new E2eInvalidStateTransitionError(current, target);
+    }
+  }
+
+  public static isTerminal(state: E2eCallState): boolean {
+    return state === E2E_STATE_TERMINATED;
+  }
+}

@@ -5,6 +5,7 @@ import type {
 import type { RealtimeProviderType } from '../constants/realtime-ai.constants';
 import type { RealtimeAudioFrame } from '../types/realtime-ai.types';
 import { RealtimeProviderUnavailableError } from '../errors/realtime-ai.errors';
+import { OpenAiRealtimeProvider } from '../../openai-realtime/openai-realtime.provider';
 
 export class MockRealtimeAiProvider implements IRealtimeAiProvider {
   public readonly providerName = 'mock';
@@ -75,15 +76,16 @@ export class MockRealtimeAiProvider implements IRealtimeAiProvider {
 
 export class RealtimeAiProviderFactory implements IRealtimeAiProviderFactory {
   private readonly mockProvider = new MockRealtimeAiProvider();
+  private readonly openAiProvider = new OpenAiRealtimeProvider();
 
   public getProvider(provider: RealtimeProviderType): IRealtimeAiProvider {
     switch (provider) {
       case 'mock':
         return this.mockProvider;
       case 'openai':
-        // Future concrete adapters plug in here
-        return this.mockProvider; 
+        return this.openAiProvider;
       case 'gemini':
+        // Gemini Live provider: registered when implemented
         return this.mockProvider;
       default:
         throw new Error(`Realtime provider ${provider} is not registered in this adapter factory.`);

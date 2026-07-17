@@ -1,19 +1,26 @@
 /**
- * Conversation Orchestrator Barrel Export Registry
+ * Conversation Orchestrator Module Barrel Exports
  */
 
-export * from './constants/conversation-orchestrator.constants';
-export * from './types/conversation-orchestrator.types';
-export * from './errors/conversation-orchestrator.errors';
-export * from './interfaces/conversation-orchestrator.interfaces';
-export * from './events/conversation-orchestrator.events';
-export * from './events/conversation-orchestrator-event.publisher';
-export * from './services/orchestration-session.model';
-export * from './services/orchestration-session.state-machine';
-export * from './services/turn.manager';
-export * from './services/transcript.manager';
-export * from './services/context.synchronizer';
-export * from './services/conversation-orchestrator.service';
-export * from './middleware/orchestrator-security.validator';
-export * from './validators/conversation-orchestrator.validators';
-export * from './dto/conversation-orchestrator.dto';
+export * from './conversation-orchestrator.constants';
+export * from './conversation-orchestrator.types';
+export * from './conversation-orchestrator.errors';
+export * from './conversation-orchestrator.interfaces';
+export * from './conversation-orchestrator.events';
+export * from './conversation-orchestrator-event.publisher';
+export * from './conversation-recovery.manager';
+export * from './conversation-snapshot.manager';
+export * from './runtime-resource.manager';
+export * from './orchestration-session.model';
+export * from './orchestration-session.state-machine';
+export * from './turn.manager';
+export * from './transcript.manager';
+export * from './context.synchronizer';
+export * from './conversation-orchestrator.service';
+export * from './conversation-orchestrator.security.validator';
+export * from './conversation-orchestrator.metrics.collector';
+export * from './conversation-orchestrator.audit.logger';
+export * from './conversation-orchestrator.validators';
+export * from './conversation-orchestrator.dto';
+export * from './conversation-orchestrator.controller';
+export * from './conversation-orchestrator.routes';

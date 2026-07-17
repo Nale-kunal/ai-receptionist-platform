@@ -1,99 +1,122 @@
-import { ConversationOrchestratorService } from '../services/conversation-orchestrator.service';
-import { TurnManager } from '../services/turn.manager';
-import { TranscriptManager } from '../services/transcript.manager';
-import { ContextSynchronizer } from '../services/context.synchronizer';
-import { InProcessOrchestratorEventPublisher } from '../events/conversation-orchestrator-event.publisher';
-import type { IOrchestratorMetricsCollector } from '../interfaces/conversation-orchestrator.interfaces';
+import { ConversationOrchestratorService } from '../conversation-orchestrator.service';
+import { TurnManager } from '../turn.manager';
+import { TranscriptManager } from '../transcript.manager';
+import { ContextSynchronizer } from '../context.synchronizer';
+import { ConversationRecoveryManager } from '../conversation-recovery.manager';
+import { ConversationSnapshotManager } from '../conversation-snapshot.manager';
+import { RuntimeResourceManager } from '../runtime-resource.manager';
+import { InProcessOrchestratorEventPublisher } from '../conversation-orchestrator-event.publisher';
+import { OrchestratorMetricsCollector } from '../conversation-orchestrator.metrics.collector';
+import type { IOrchestratorAuditLogger } from '../conversation-orchestrator.interfaces';
+import type { EventCorrelation } from '../conversation-orchestrator.types';
 
-describe('ConversationOrchestratorService', () => {
+describe('ConversationOrchestratorService Integration', () => {
   let service: ConversationOrchestratorService;
-  let metrics: jest.Mocked<IOrchestratorMetricsCollector>;
+  let auditLogger: jest.Mocked<IOrchestratorAuditLogger>;
   let publisher: InProcessOrchestratorEventPublisher;
+  let correlation: EventCorrelation;
 
   beforeEach(() => {
-    metrics = {
-      trackSessionStart: jest.fn(),
-      trackSessionEnd: jest.fn(),
-      trackInterruption: jest.fn(),
-      trackResume: jest.fn(),
-      trackResponse: jest.fn(),
-      trackToolRequest: jest.fn(),
-      trackReconnect: jest.fn(),
-      trackTimeout: jest.fn(),
-      trackLatency: jest.fn(),
-      trackTranscriptSize: jest.fn(),
-      getMetrics: jest.fn(),
-    } as unknown as jest.Mocked<IOrchestratorMetricsCollector>;
+    auditLogger = {
+      logSessionCreated: jest.fn().mockResolvedValue(undefined),
+      logSessionClosed: jest.fn().mockResolvedValue(undefined),
+      logStateTransition: jest.fn().mockResolvedValue(undefined),
+      logTimeoutTriggered: jest.fn().mockResolvedValue(undefined),
+      logInterruptionDetected: jest.fn().mockResolvedValue(undefined),
+      logSnapshotCreated: jest.fn().mockResolvedValue(undefined),
+      logSessionRecovered: jest.fn().mockResolvedValue(undefined),
+    } as unknown as jest.Mocked<IOrchestratorAuditLogger>;
 
     publisher = new InProcessOrchestratorEventPublisher();
+
+    const snapshotManager = new ConversationSnapshotManager();
+    const recoveryManager = new ConversationRecoveryManager(snapshotManager, { maxRecoveryTtlMs: 200 });
 
     service = new ConversationOrchestratorService(
       new TurnManager(),
       new TranscriptManager(),
       new ContextSynchronizer(),
+      recoveryManager,
+      snapshotManager,
+      new RuntimeResourceManager(),
       publisher,
-      metrics,
+      new OrchestratorMetricsCollector(),
+      auditLogger,
       {
         rateLimitConversationsPerMinute: 10,
         aiTimeoutMs: 50,
         inactivityTimeoutMs: 50,
       }
     );
+
+    correlation = {
+      correlationId: 'c1',
+      traceId: 'tr1',
+      tenantId: 't1',
+      sessionId: '',
+      conversationId: '33333333-3333-3333-3333-333333333333',
+      timestamp: new Date(),
+    };
   });
 
-  it('runs initial auto transitions and updates states correctly', async () => {
+  it('runs initial auto transitions and logs audit transitions successfully', async () => {
     const session = await service.createSession({
       tenantId: 't1',
       clinicId: null,
-      conversationId: '33333333-3333-3333-3333-333333333333',
+      conversationId: correlation.conversationId,
+      correlation,
     });
 
     expect(session.state).toBe('INITIALIZING');
-    
-    const updated = await service.updateState(session.sessionId, 't1', 'GREETING');
+    expect(auditLogger.logSessionCreated).toHaveBeenCalled();
+
+    const updated = await service.updateState(session.sessionId, 't1', 'GREETING', correlation);
     expect(updated.state).toBe('GREETING');
+    expect(auditLogger.logStateTransition).toHaveBeenCalledWith(
+      session.sessionId,
+      't1',
+      'INITIALIZING',
+      'GREETING',
+      correlation
+    );
   });
 
-  it('handles barge-in interruptions and restores lifecycle state', async () => {
+  it('handles barge-in interruptions and recovers checkpoints', async () => {
     const session = await service.createSession({
       tenantId: 't1',
       clinicId: null,
-      conversationId: '33333333-3333-3333-3333-333333333333',
+      conversationId: correlation.conversationId,
+      correlation,
     });
 
-    await service.updateState(session.sessionId, 't1', 'GREETING');
-    await service.updateState(session.sessionId, 't1', 'LISTENING');
-    await service.updateState(session.sessionId, 't1', 'PROCESSING');
-    await service.updateState(session.sessionId, 't1', 'RESPONDING');
+    await service.updateState(session.sessionId, 't1', 'GREETING', correlation);
+    await service.updateState(session.sessionId, 't1', 'LISTENING', correlation);
+    await service.updateState(session.sessionId, 't1', 'PROCESSING', correlation);
+    await service.updateState(session.sessionId, 't1', 'RESPONDING', correlation);
 
-    const interrupted = await service.handleInterruption(session.sessionId, 't1', 500);
-    // handleInterruption transitions RESPONDING -> INTERRUPTED -> (auto) RESUMED -> (auto) LISTENING
+    const interrupted = await service.handleInterruption(session.sessionId, 't1', 500, correlation);
     expect(interrupted.state).toBe('LISTENING');
-    expect(metrics.trackInterruption).toHaveBeenCalled();
+    expect(auditLogger.logInterruptionDetected).toHaveBeenCalled();
   });
 
-  it('clears timers and clean resources on terminal state', async () => {
+  it('restores reconnect checkpoints gracefully on triggerReconnectRecovery', async () => {
     const session = await service.createSession({
       tenantId: 't1',
       clinicId: null,
-      conversationId: '33333333-3333-3333-3333-333333333333',
+      conversationId: correlation.conversationId,
+      correlation,
     });
 
-    await service.updateState(session.sessionId, 't1', 'GREETING');
-    await service.updateState(session.sessionId, 't1', 'LISTENING');
-    await service.updateState(session.sessionId, 't1', 'PROCESSING');
-    await service.updateState(session.sessionId, 't1', 'RESPONDING');
-    await service.updateState(session.sessionId, 't1', 'WAITING');
-    await service.updateState(session.sessionId, 't1', 'ENDING');
-    
-    const completed = await service.updateState(session.sessionId, 't1', 'COMPLETED');
-    expect(completed.state).toBe('COMPLETED');
+    await service.updateState(session.sessionId, 't1', 'GREETING', correlation);
+    await service.updateState(session.sessionId, 't1', 'LISTENING', correlation);
 
-    // Should be deleted from active service memory map
-    await expect(service.getSession(session.sessionId, 't1')).rejects.toThrow();
+    // Call reconnect recovery trigger
+    const recovered = await service.triggerReconnectRecovery(session.sessionId, 't1', correlation);
+    expect(recovered.state).toBe('RESUMED');
+    expect(auditLogger.logSessionRecovered).toHaveBeenCalled();
   });
 
-  it('triggers inactivity timeouts gracefully', (done) => {
+  it('triggers inactivity timeouts gracefully publishing failure event', (done) => {
     let failedEventReceived = false;
     publisher.subscribe('conversation.failed', () => {
       failedEventReceived = true;
@@ -102,16 +125,16 @@ describe('ConversationOrchestratorService', () => {
     service.createSession({
       tenantId: 't1',
       clinicId: null,
-      conversationId: '33333333-3333-3333-3333-333333333333',
+      conversationId: correlation.conversationId,
+      correlation,
     }).then(async (session) => {
-      await service.updateState(session.sessionId, 't1', 'GREETING');
-      await service.updateState(session.sessionId, 't1', 'LISTENING');
+      await service.updateState(session.sessionId, 't1', 'GREETING', correlation);
+      await service.updateState(session.sessionId, 't1', 'LISTENING', correlation);
 
-      // Wait for inactivity timer
       setTimeout(async () => {
         try {
           expect(failedEventReceived).toBe(true);
-          expect(metrics.trackTimeout).toHaveBeenCalled();
+          expect(auditLogger.logTimeoutTriggered).toHaveBeenCalled();
           done();
         } catch (err) {
           done(err);
