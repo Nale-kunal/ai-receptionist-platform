@@ -11,13 +11,15 @@ import type { SafeAppointment } from '../types/appointment.types';
 
 export interface CreateAppointmentParams {
   tenantId: string;
-  clinicId: string;
+  clinicId?: string;
   doctorId: string;
   patientId: string;
   startTime: Date;
   endTime: Date;
   timezone: string;
   source: AppointmentSource;
+  appointmentType?: string;
+  durationMinutes?: number;
   notes?: string | null;
 
   actorId: string;
@@ -38,6 +40,7 @@ export interface RescheduleAppointmentParams {
   tenantId: string;
   startTime: Date;
   endTime: Date;
+  durationMinutes?: number;
   timezone?: string;
   notes?: string | null;
 
@@ -61,11 +64,21 @@ export interface ListAppointmentsParams {
   patientId?: string;
   status?: AppointmentStatus;
   source?: AppointmentSource;
+  search?: string;
   startFrom?: Date;
   startTo?: Date;
   publicId?: string;
+  page?: number;
   limit?: number;
   offset?: number;
+}
+
+export interface PaginatedAppointmentsResponse {
+  appointments: SafeAppointment[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +95,8 @@ export interface IAppointmentService {
   markNoShow(id: string, tenantId: string, actorId: string, requestId: string): Promise<SafeAppointment>;
   getAppointmentById(id: string, tenantId: string): Promise<SafeAppointment>;
   getAppointmentByPublicId(publicId: string, tenantId: string): Promise<SafeAppointment>;
-  listAppointments(params: ListAppointmentsParams): Promise<SafeAppointment[]>;
+  listAppointments(params: ListAppointmentsParams): Promise<SafeAppointment[] | PaginatedAppointmentsResponse>;
+  getStatusCounters(tenantId: string, clinicId?: string): Promise<Record<string, number>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +114,8 @@ export interface IAppointmentRepository {
     timezone: string;
     status: AppointmentStatus;
     source: AppointmentSource;
+    appointmentType?: string;
+    durationMinutes?: number;
     notes?: string | null;
   }): Promise<unknown>;
 
@@ -108,6 +124,7 @@ export interface IAppointmentRepository {
     data: {
       startTime?: Date;
       endTime?: Date;
+      durationMinutes?: number;
       timezone?: string;
       status?: AppointmentStatus;
       notes?: string | null;
@@ -127,6 +144,7 @@ export interface IAppointmentRepository {
     patientId?: string;
     status?: AppointmentStatus;
     source?: AppointmentSource;
+    search?: string;
     startFrom?: Date;
     startTo?: Date;
     publicId?: string;
@@ -135,11 +153,28 @@ export interface IAppointmentRepository {
     includeDeleted?: boolean;
   }): Promise<unknown[]>;
 
+  countMany(params: {
+    tenantId: string;
+    clinicId?: string;
+    doctorId?: string;
+    patientId?: string;
+    status?: AppointmentStatus;
+    source?: AppointmentSource;
+    search?: string;
+    startFrom?: Date;
+    startTo?: Date;
+    publicId?: string;
+    includeDeleted?: boolean;
+  }): Promise<number>;
+
+  getStatusCounters(tenantId: string, clinicId?: string): Promise<Record<string, number>>;
+
   /**
    * Returns appointments that overlap [startTime, endTime) for a given doctor
    * (excluding terminal statuses and the appointment with excludeId, if given).
    */
   findConflicts(params: {
+    tenantId?: string;
     doctorId: string;
     clinicId: string;
     startTime: Date;
@@ -159,6 +194,15 @@ export interface IAppointmentRepository {
   /** Fetch doctor status to verify it is active */
   getDoctorStatus(doctorId: string): Promise<string | null>;
 
+  /** Fetch doctor details including workingHours and leaves */
+  getDoctorDetails(doctorId: string): Promise<{ id: string; status: string; workingHours: any; leaves: any } | null>;
+
   /** Fetch patient status to verify it is active */
   getPatientStatus(patientId: string): Promise<string | null>;
+
+  /** Fetch doctor clinic ID */
+  getDoctorClinicId(doctorId: string): Promise<string | null>;
+
+  /** Fetch main clinic for tenant */
+  findMainClinicForTenant(tenantId: string): Promise<unknown | null>;
 }

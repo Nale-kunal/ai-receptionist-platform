@@ -63,6 +63,7 @@ describe('PermissionEvaluatorService', () => {
       mockPermissionRepository as any,
       cache,
       publisher,
+      { enableTransitionalFallback: false },
     );
   });
 

@@ -6,6 +6,8 @@ interface ModalProps {
   onClose: () => void;
   title: string;
   children: React.ReactNode;
+  maxWidth?: string;
+  hideFooterCancel?: boolean;
 }
 
 export const Modal: React.FC<ModalProps> = ({
@@ -13,6 +15,8 @@ export const Modal: React.FC<ModalProps> = ({
   onClose,
   title,
   children,
+  maxWidth = '500px',
+  hideFooterCancel = false,
 }) => {
   if (!isOpen) return null;
 
@@ -36,9 +40,11 @@ export const Modal: React.FC<ModalProps> = ({
         className="card"
         style={{
           width: '100%',
-          maxWidth: '500px',
+          maxWidth,
           boxShadow: 'var(--shadow-lg)',
           animation: 'modal-appear 0.2s ease-out',
+          maxHeight: '90vh',
+          overflowY: 'auto',
         }}
       >
         <div className="flex items-center justify-between mb-4" style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '12px' }}>
@@ -56,12 +62,14 @@ export const Modal: React.FC<ModalProps> = ({
             &times;
           </button>
         </div>
-        <div style={{ marginBottom: '24px' }}>{children}</div>
-        <div className="flex justify-end gap-2">
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-        </div>
+        <div>{children}</div>
+        {!hideFooterCancel && (
+          <div className="flex justify-end gap-2" style={{ marginTop: '16px' }}>
+            <Button variant="secondary" onClick={onClose}>
+              Cancel
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );

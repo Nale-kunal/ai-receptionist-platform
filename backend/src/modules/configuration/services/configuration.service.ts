@@ -65,7 +65,7 @@ export class ConfigurationService implements IConfigurationService {
     }
 
     if (!dbRecord) {
-      throw new ConfigurationNotFoundError();
+      dbRecord = await this.createDefaultConfigurationRecord(tenantId, clinicId);
     }
 
     const safeConfig = this.mapToSafeConfig(dbRecord);
@@ -74,6 +74,104 @@ export class ConfigurationService implements IConfigurationService {
     this.cache.set(cacheKey, safeConfig);
 
     return safeConfig;
+  }
+
+  private async createDefaultConfigurationRecord(
+    tenantId: string,
+    clinicId: string | null,
+  ) {
+    const SYSTEM_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
+
+    const defaultConfig = {
+      business: {
+        businessHours: [
+          { dayOfWeek: 0, openTime: '09:00', closeTime: '17:00', isClosed: true  },
+          { dayOfWeek: 1, openTime: '09:00', closeTime: '17:00', isClosed: false },
+          { dayOfWeek: 2, openTime: '09:00', closeTime: '17:00', isClosed: false },
+          { dayOfWeek: 3, openTime: '09:00', closeTime: '17:00', isClosed: false },
+          { dayOfWeek: 4, openTime: '09:00', closeTime: '17:00', isClosed: false },
+          { dayOfWeek: 5, openTime: '09:00', closeTime: '17:00', isClosed: false },
+          { dayOfWeek: 6, openTime: '09:00', closeTime: '14:00', isClosed: false },
+        ],
+        holidays: [],
+        appointmentDuration: 30,
+        bookingRules: { minAdvanceHours: 2, maxAdvanceDays: 30 },
+        cancellationRules: { minNoticeHours: 24 },
+        reschedulingRules: { minNoticeHours: 24 },
+      },
+      voice: {
+        voiceModel: 'alloy',
+        greeting: 'Hello, thank you for calling. How can I help you today?',
+        prompt: 'You are an AI dental receptionist. Be polite, professional, and helpful.',
+        language: 'en',
+      },
+      ai: {
+        promptAssignment: 'Standard Dental Receptionist',
+        tone: 'Professional',
+        greeting: 'Hello, thank you for calling. How can I help you today?',
+        provider: 'openai' as const,
+      },
+      calendar: {
+        calendarProvider: 'google' as const,
+        syncIntervalMinutes: 15,
+      },
+      notification: {
+        smsEnabled: true,
+        emailEnabled: true,
+        notificationPreferences: {},
+      },
+      branding: {
+        logo: '',
+        primaryColor: '#6366f1',
+        secondaryColor: '#10b981',
+        clinicName: 'Practice',
+        website: '',
+        emailBranding: {},
+      },
+      localization: {
+        language: 'en',
+        country: 'US',
+        timezone: 'America/New_York',
+        dateFormat: 'YYYY-MM-DD',
+        timeFormat: 'HH:mm',
+      },
+      featureFlags: {
+        voiceEnabled: true,
+        aiEnabled: true,
+        callRecordingEnabled: true,
+        smsEnabled: true,
+        emailEnabled: true,
+        analyticsEnabled: true,
+        premiumFeatures: [],
+      },
+      providers: {
+        openai: {},
+        twilio: {},
+        googleCalendar: {},
+        smtp: { provider: 'nodemailer' as const },
+      },
+    };
+
+    try {
+      return await this.repository.create({
+        tenantId,
+        clinicId,
+        version: 1,
+        isActive: true,
+        createdBy: SYSTEM_ACTOR_ID,
+        changeSummary: 'Default initial configuration',
+        ...defaultConfig,
+      });
+    } catch (err: any) {
+      // Unique constraint violation: another process already created the default record.
+      // Re-fetch and return it instead of crashing.
+      if (err?.code === 'P2002' || err?.message?.includes('unique') || err?.message?.includes('Unique')) {
+        const existing = await this.repository.findActive(tenantId, clinicId)
+          ?? await this.repository.findActive(tenantId, null);
+        if (existing) return existing;
+      }
+      throw err;
+    }
   }
 
   public async getConfigurationById(id: string, tenantId: string): Promise<SafeConfiguration> {
@@ -192,10 +290,12 @@ export class ConfigurationService implements IConfigurationService {
   }
 
   public async updateConfiguration(params: UpdateConfigurationParams): Promise<SafeConfiguration> {
-    // Update must target an existing active configuration version
-    const activeRecord = await this.repository.findActive(params.tenantId, params.clinicId);
+    let activeRecord = await this.repository.findActive(params.tenantId, params.clinicId);
+    if (!activeRecord && params.clinicId !== null) {
+      activeRecord = await this.repository.findActive(params.tenantId, null);
+    }
     if (!activeRecord) {
-      throw new ConfigurationNotFoundError();
+      activeRecord = await this.createDefaultConfigurationRecord(params.tenantId, params.clinicId);
     }
 
     const current = this.mapToSafeConfig(activeRecord);
@@ -402,6 +502,9 @@ export class ConfigurationService implements IConfigurationService {
   }
 
   private mapToSafeConfig(dbRecord: any): SafeConfiguration {
+    if (!dbRecord) {
+      throw new ConfigurationNotFoundError();
+    }
     return {
       id: dbRecord.id,
       tenantId: dbRecord.tenantId,

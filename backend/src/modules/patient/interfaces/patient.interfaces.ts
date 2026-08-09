@@ -7,7 +7,7 @@ import type { SafePatient, PatientEmergencyContact } from '../types/patient.type
 
 export interface CreatePatientParams {
   tenantId: string;
-  clinicId: string;
+  clinicId?: string;
   fullName: string;
   phone: string;
   email?: string | null;
@@ -16,6 +16,8 @@ export interface CreatePatientParams {
   preferredLanguage?: string;
   preferredContactMethod?: ContactMethod;
   emergencyContact?: PatientEmergencyContact | null;
+  allowExisting?: boolean;
+  allowEmailSharing?: boolean;
   
   actorId: string;
   requestId: string;
@@ -33,6 +35,7 @@ export interface UpdatePatientParams {
   preferredLanguage?: string;
   preferredContactMethod?: ContactMethod;
   emergencyContact?: PatientEmergencyContact | null;
+  allowEmailSharing?: boolean;
   
   actorId: string;
   requestId: string;
@@ -49,6 +52,7 @@ export interface IPatientService {
     phone?: string;
     email?: string;
     fullName?: string;
+    search?: string;
     status?: PatientStatus;
     limit?: number;
     offset?: number;
@@ -106,10 +110,12 @@ export interface IPatientRepository {
     phone?: string;
     email?: string;
     fullName?: string;
+    search?: string;
     status?: PatientStatus;
     limit?: number;
     offset?: number;
     includeDeleted?: boolean;
   }): Promise<unknown[]>;
   clinicBelongsToTenant(clinicId: string, tenantId: string): Promise<boolean>;
+  findMainClinicForTenant(tenantId: string): Promise<unknown | null>;
 }

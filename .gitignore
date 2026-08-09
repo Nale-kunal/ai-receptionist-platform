@@ -58,4 +58,6 @@ Thumbs.db
 *.db-journal
 *.sqlite
 secrets/
+cookies.txt
+*.txt
 credentials.json

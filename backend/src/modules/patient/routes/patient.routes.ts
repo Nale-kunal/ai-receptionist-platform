@@ -35,6 +35,14 @@ export function createPatientRouter(deps: PatientRouterDeps): Router {
   const requirePatientUpdate = authorize.requirePermission(PERM_PATIENT_UPDATE);
   const requirePatientDelete = authorize.requirePermission(PERM_PATIENT_DELETE);
 
+  // 0. Search patients by query (Name, Phone, Email, MRN)
+  router.get('/search',
+    authenticate,
+    resolveTenant,
+    requirePatientRead,
+    controller.listPatients,
+  );
+
   // 1. List patients
   router.get('/',
     authenticate,

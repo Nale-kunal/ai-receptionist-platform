@@ -34,8 +34,11 @@ import type { IAppointmentEventPublisher } from '../events/appointment-event.pub
 import type { SafeAppointment } from '../types/appointment.types';
 import type { AppointmentStatus, AppointmentSource } from '../constants/appointment.constants';
 import {
+  APPOINTMENT_STATUS_SCHEDULED,
   APPOINTMENT_STATUS_PENDING,
   APPOINTMENT_STATUS_CONFIRMED,
+  APPOINTMENT_STATUS_CHECKED_IN,
+  APPOINTMENT_STATUS_IN_PROGRESS,
   APPOINTMENT_STATUS_COMPLETED,
   APPOINTMENT_STATUS_CANCELLED,
   APPOINTMENT_STATUS_NO_SHOW,
@@ -65,34 +68,128 @@ import {
 } from '../events/appointment.events';
 
 // ---------------------------------------------------------------------------
+// Doctor Working Hours Validator Helper
+// ---------------------------------------------------------------------------
+
+const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+function parseHHmm(timeStr: string): number {
+  const [h, m] = (timeStr || '').split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+
+function checkDoctorWorkingHours(
+  workingHours: any,
+  startTime: Date,
+  endTime: Date
+): { valid: boolean; reason?: string } {
+  if (!Array.isArray(workingHours) || workingHours.length === 0) {
+    return { valid: true };
+  }
+
+  const dayOfWeekNum = startTime.getDay();
+  const dayName = DAY_NAMES[dayOfWeekNum];
+
+  const matchedDay = workingHours.find((wh: any) => {
+    if (typeof wh.day === 'string' && wh.day.toLowerCase() === dayName) return true;
+    if (typeof wh.dayOfWeek === 'number' && wh.dayOfWeek === dayOfWeekNum) return true;
+    if (
+      typeof wh.dayOfWeek === 'string' &&
+      (wh.dayOfWeek.toLowerCase() === dayName || parseInt(wh.dayOfWeek, 10) === dayOfWeekNum)
+    )
+      return true;
+    return false;
+  });
+
+  if (!matchedDay) {
+    return { valid: false, reason: `Practitioner does not work on ${dayName}s.` };
+  }
+
+  const isOff = matchedDay.isClosed === true || matchedDay.isOff === true || matchedDay.closed === true;
+  if (isOff) {
+    return { valid: false, reason: `Practitioner is off / closed on ${dayName}s.` };
+  }
+
+  const openTime = matchedDay.openTime || matchedDay.startTime || matchedDay.start || '09:00';
+  const closeTime = matchedDay.closeTime || matchedDay.endTime || matchedDay.end || '17:00';
+
+  const startMins = startTime.getHours() * 60 + startTime.getMinutes();
+  const endMins = endTime.getHours() * 60 + endTime.getMinutes();
+
+  const openMins = parseHHmm(openTime);
+  const closeMins = parseHHmm(closeTime);
+
+  if (startMins < openMins || endMins > closeMins) {
+    return {
+      valid: false,
+      reason: `Selected appointment slot is outside practitioner working hours (${openTime} to ${closeTime}).`,
+    };
+  }
+
+  // Validate lunch break (default 12:00 to 13:00)
+  const breakStartStr = matchedDay.breakStart || '12:00';
+  const breakEndStr = matchedDay.breakEnd || '13:00';
+  const breakStartMins = parseHHmm(breakStartStr);
+  const breakEndMins = parseHHmm(breakEndStr);
+
+  if (breakEndMins > breakStartMins) {
+    if (startMins < breakEndMins && endMins > breakStartMins) {
+      return {
+        valid: false,
+        reason: `Selected appointment slot overlaps practitioner lunch break (${breakStartStr} to ${breakEndStr}).`,
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
+// ---------------------------------------------------------------------------
 // State Machine
 // ---------------------------------------------------------------------------
 
-/**
- * Allowed transitions per contract state machine.
- *
- * pending     → confirmed | cancelled | no_show
- * confirmed   → completed | cancelled | no_show | rescheduled
- * rescheduled → confirmed | cancelled
- * cancelled   → (terminal)
- * completed   → (terminal)
- * no_show     → (terminal)
- */
 const ALLOWED_TRANSITIONS: Record<AppointmentStatus, AppointmentStatus[]> = {
-  [APPOINTMENT_STATUS_PENDING]: [
+  [APPOINTMENT_STATUS_SCHEDULED]: [
     APPOINTMENT_STATUS_CONFIRMED,
+    APPOINTMENT_STATUS_CHECKED_IN,
     APPOINTMENT_STATUS_CANCELLED,
     APPOINTMENT_STATUS_NO_SHOW,
+    APPOINTMENT_STATUS_RESCHEDULED,
+  ],
+  [APPOINTMENT_STATUS_PENDING]: [
+    APPOINTMENT_STATUS_SCHEDULED,
+    APPOINTMENT_STATUS_CONFIRMED,
+    APPOINTMENT_STATUS_CHECKED_IN,
+    APPOINTMENT_STATUS_CANCELLED,
+    APPOINTMENT_STATUS_NO_SHOW,
+    APPOINTMENT_STATUS_RESCHEDULED,
   ],
   [APPOINTMENT_STATUS_CONFIRMED]: [
+    APPOINTMENT_STATUS_CHECKED_IN,
+    APPOINTMENT_STATUS_IN_PROGRESS,
     APPOINTMENT_STATUS_COMPLETED,
     APPOINTMENT_STATUS_CANCELLED,
     APPOINTMENT_STATUS_NO_SHOW,
     APPOINTMENT_STATUS_RESCHEDULED,
   ],
-  [APPOINTMENT_STATUS_RESCHEDULED]: [
-    APPOINTMENT_STATUS_CONFIRMED,
+  [APPOINTMENT_STATUS_CHECKED_IN]: [
+    APPOINTMENT_STATUS_IN_PROGRESS,
     APPOINTMENT_STATUS_CANCELLED,
+    APPOINTMENT_STATUS_NO_SHOW,
+  ],
+  [APPOINTMENT_STATUS_IN_PROGRESS]: [
+    APPOINTMENT_STATUS_COMPLETED,
+    APPOINTMENT_STATUS_CANCELLED,
+  ],
+  [APPOINTMENT_STATUS_RESCHEDULED]: [
+    APPOINTMENT_STATUS_SCHEDULED,
+    APPOINTMENT_STATUS_CONFIRMED,
+    APPOINTMENT_STATUS_CHECKED_IN,
+    APPOINTMENT_STATUS_IN_PROGRESS,
+    APPOINTMENT_STATUS_COMPLETED,
+    APPOINTMENT_STATUS_CANCELLED,
+    APPOINTMENT_STATUS_NO_SHOW,
+    APPOINTMENT_STATUS_RESCHEDULED,
   ],
   [APPOINTMENT_STATUS_CANCELLED]: [],
   [APPOINTMENT_STATUS_COMPLETED]: [],
@@ -114,13 +211,28 @@ export class AppointmentService implements IAppointmentService {
   // -------------------------------------------------------------------------
 
   public async createAppointment(params: CreateAppointmentParams): Promise<SafeAppointment> {
+    // 0. Auto-resolve clinicId if omitted
+    let clinicId = params.clinicId;
+    if (!clinicId) {
+      const docClinicId = await this.repository.getDoctorClinicId(params.doctorId);
+      if (docClinicId) {
+        clinicId = docClinicId;
+      } else {
+        const mainClinic: any = await this.repository.findMainClinicForTenant(params.tenantId);
+        if (!mainClinic) {
+          throw new ClinicNotActiveError();
+        }
+        clinicId = mainClinic.id;
+      }
+    }
+
     // 1. Validate time ordering
     if (params.endTime <= params.startTime) {
       throw new AppointmentTimeRangeError('endTime must be after startTime.');
     }
 
     // 2. Clinic is active
-    const clinicActive = await this.repository.clinicIsActive(params.clinicId, params.tenantId);
+    const clinicActive = await this.repository.clinicIsActive(clinicId!, params.tenantId);
     if (!clinicActive) {
       throw new ClinicNotActiveError();
     }
@@ -128,23 +240,29 @@ export class AppointmentService implements IAppointmentService {
     // 3. Doctor belongs to clinic & tenant
     const doctorValid = await this.repository.doctorBelongsToClinic(
       params.doctorId,
-      params.clinicId,
+      clinicId!,
       params.tenantId,
     );
     if (!doctorValid) {
       throw new AppointmentOwnershipError();
     }
 
-    // 4. Doctor is active
-    const doctorStatus = await this.repository.getDoctorStatus(params.doctorId);
-    if (doctorStatus !== 'active') {
-      throw new DoctorNotAvailableError();
+    // 4. Doctor is active & working hours check
+    const doctorDetails = typeof this.repository.getDoctorDetails === 'function'
+      ? await this.repository.getDoctorDetails(params.doctorId)
+      : { id: params.doctorId, status: await this.repository.getDoctorStatus(params.doctorId), workingHours: [] };
+    if (!doctorDetails || doctorDetails.status !== 'active') {
+      throw new DoctorNotAvailableError('Practitioner is inactive or unavailable.');
+    }
+    const workHoursCheck = checkDoctorWorkingHours(doctorDetails.workingHours, params.startTime, params.endTime);
+    if (!workHoursCheck.valid) {
+      throw new DoctorNotAvailableError(workHoursCheck.reason);
     }
 
     // 5. Patient belongs to clinic & tenant
     const patientValid = await this.repository.patientBelongsToClinic(
       params.patientId,
-      params.clinicId,
+      clinicId!,
       params.tenantId,
     );
     if (!patientValid) {
@@ -160,7 +278,7 @@ export class AppointmentService implements IAppointmentService {
     // 7. Conflict detection
     const conflicts = await this.repository.findConflicts({
       doctorId:  params.doctorId,
-      clinicId:  params.clinicId,
+      clinicId:  clinicId!,
       startTime: params.startTime,
       endTime:   params.endTime,
     });
@@ -171,14 +289,16 @@ export class AppointmentService implements IAppointmentService {
     // 8. Persist
     const created = await this.repository.create({
       tenantId:  params.tenantId,
-      clinicId:  params.clinicId,
+      clinicId:  clinicId!,
       doctorId:  params.doctorId,
       patientId: params.patientId,
       startTime: params.startTime,
       endTime:   params.endTime,
       timezone:  params.timezone,
-      status:    APPOINTMENT_STATUS_PENDING,
+      status:    APPOINTMENT_STATUS_SCHEDULED,
       source:    params.source,
+      appointmentType: params.appointmentType ?? 'checkup',
+      durationMinutes: params.durationMinutes ?? 30,
       notes:     params.notes,
     });
 
@@ -257,8 +377,21 @@ export class AppointmentService implements IAppointmentService {
     // Must be in a state that allows rescheduling
     this.assertTransitionAllowed(existing.status, APPOINTMENT_STATUS_RESCHEDULED);
 
+    // Doctor details & working hours check on reschedule
+    const doctorDetails = typeof this.repository.getDoctorDetails === 'function'
+      ? await this.repository.getDoctorDetails(existing.doctorId)
+      : { id: existing.doctorId, status: await this.repository.getDoctorStatus(existing.doctorId), workingHours: [] };
+    if (!doctorDetails || doctorDetails.status !== 'active') {
+      throw new DoctorNotAvailableError('Practitioner is inactive or unavailable.');
+    }
+    const workHoursCheck = checkDoctorWorkingHours(doctorDetails.workingHours, params.startTime, params.endTime);
+    if (!workHoursCheck.valid) {
+      throw new DoctorNotAvailableError(workHoursCheck.reason);
+    }
+
     // Conflict detection (excluding self)
     const conflicts = await this.repository.findConflicts({
+      tenantId:  existing.tenantId,
       doctorId:  existing.doctorId,
       clinicId:  existing.clinicId,
       startTime: params.startTime,
@@ -272,10 +405,15 @@ export class AppointmentService implements IAppointmentService {
     const previousStartTime = existing.startTime;
     const previousEndTime   = existing.endTime;
 
+    const durationMinutes =
+      params.durationMinutes ??
+      Math.max(5, Math.round((params.endTime.getTime() - params.startTime.getTime()) / 60000));
+
     const updated = await this.repository.update(params.id, {
-      startTime: params.startTime,
-      endTime:   params.endTime,
-      status:    APPOINTMENT_STATUS_RESCHEDULED,
+      startTime:       params.startTime,
+      endTime:         params.endTime,
+      durationMinutes,
+      status:          APPOINTMENT_STATUS_RESCHEDULED,
       ...(params.timezone !== undefined ? { timezone: params.timezone } : {}),
       ...(params.notes    !== undefined ? { notes:    params.notes    } : {}),
     });
@@ -464,21 +602,54 @@ export class AppointmentService implements IAppointmentService {
     return safe;
   }
 
-  public async listAppointments(params: ListAppointmentsParams): Promise<SafeAppointment[]> {
-    const records = await this.repository.findMany({
-      tenantId:  params.tenantId,
-      clinicId:  params.clinicId,
-      doctorId:  params.doctorId,
-      patientId: params.patientId,
-      status:    params.status,
-      source:    params.source,
-      startFrom: params.startFrom,
-      startTo:   params.startTo,
-      publicId:  params.publicId,
-      limit:     params.limit,
-      offset:    params.offset,
-    });
-    return records.map((r) => this.toSafe(r));
+  public async listAppointments(params: ListAppointmentsParams): Promise<any> {
+    const page = params.page ?? 1;
+    const limit = params.limit ?? 20;
+    const offset = params.offset ?? (page - 1) * limit;
+
+    const [records, total] = await Promise.all([
+      this.repository.findMany({
+        tenantId:  params.tenantId,
+        clinicId:  params.clinicId,
+        doctorId:  params.doctorId,
+        patientId: params.patientId,
+        status:    params.status,
+        source:    params.source,
+        search:    params.search,
+        startFrom: params.startFrom,
+        startTo:   params.startTo,
+        publicId:  params.publicId,
+        limit,
+        offset,
+      }),
+      this.repository.countMany({
+        tenantId:  params.tenantId,
+        clinicId:  params.clinicId,
+        doctorId:  params.doctorId,
+        patientId: params.patientId,
+        status:    params.status,
+        source:    params.source,
+        search:    params.search,
+        startFrom: params.startFrom,
+        startTo:   params.startTo,
+        publicId:  params.publicId,
+      }),
+    ]);
+
+    const mapped = records.map((r) => this.toSafe(r));
+    const totalPages = Math.ceil(total / limit) || 1;
+
+    return {
+      appointments: mapped,
+      total,
+      page,
+      limit,
+      totalPages,
+    };
+  }
+
+  public async getStatusCounters(tenantId: string, clinicId?: string): Promise<Record<string, number>> {
+    return this.repository.getStatusCounters(tenantId, clinicId);
   }
 
   // -------------------------------------------------------------------------
@@ -523,6 +694,8 @@ export class AppointmentService implements IAppointmentService {
       patientId:          record.patientId,
       startTime:          record.startTime,
       endTime:            record.endTime,
+      durationMinutes:    record.durationMinutes ?? 30,
+      appointmentType:    record.appointmentType ?? 'checkup',
       timezone:           record.timezone,
       status:             record.status as AppointmentStatus,
       source:             record.source as AppointmentSource,
@@ -532,6 +705,9 @@ export class AppointmentService implements IAppointmentService {
       createdAt:          record.createdAt,
       updatedAt:          record.updatedAt,
       deletedAt:          record.deletedAt ?? null,
+      patientName:        record.patient?.fullName,
+      patientPhone:       record.patient?.phone,
+      doctorName:         record.doctor?.fullName,
     };
   }
 }

@@ -10,7 +10,7 @@ import {
 
 export const CreateAppointmentSchema = z
   .object({
-    clinicId: z.string().uuid('Clinic ID must be a valid UUID'),
+    clinicId: z.string().uuid('Clinic ID must be a valid UUID').optional(),
     doctorId: z.string().uuid('Doctor ID must be a valid UUID'),
     patientId: z.string().uuid('Patient ID must be a valid UUID'),
     startTime: z
@@ -21,6 +21,8 @@ export const CreateAppointmentSchema = z
       .datetime({ message: 'endTime must be an ISO 8601 datetime string' }),
     timezone: z.string().min(1).max(64).default('UTC'),
     source: z.enum(APPOINTMENT_SOURCES).default(APPOINTMENT_SOURCE_DASHBOARD),
+    appointmentType: z.string().optional(),
+    durationMinutes: z.number().int().positive().optional(),
     notes: z.string().max(2000).nullable().optional(),
   })
   .refine(

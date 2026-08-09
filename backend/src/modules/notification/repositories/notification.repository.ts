@@ -133,7 +133,11 @@ export class NotificationRepository implements INotificationRepository {
     const now = new Date();
     return this.prisma.notification.findMany({
       where: {
-        status:    'pending',
+        // Include all non-terminal, non-cancelled, non-expired statuses.
+        // 'pending' and 'queued' are the normal pre-delivery states.
+        // 'sending' is included so that stale in-flight records from a crashed
+        // worker can be detected and reset by the caller.
+        status:    { in: ['pending', 'queued', 'sending'] },
         deletedAt: null,
         OR: [
           { scheduledAt: null },

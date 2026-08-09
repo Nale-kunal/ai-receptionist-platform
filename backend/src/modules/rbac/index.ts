@@ -69,6 +69,14 @@ export {
 } from './constants/rbac.constants';
 export type { PermissionName, SystemRoleName, AuthorizationOutcome } from './constants/rbac.constants';
 
+export {
+  CUSTOMER_ROLES_MAP,
+  ALLOWED_CUSTOMER_ROLES,
+  isValidCustomerRole,
+  getRoleDisplayName,
+} from './constants/role-config.constants';
+export type { CustomerRoleDef } from './constants/role-config.constants';
+
 // Errors
 export {
   RbacError,
@@ -132,6 +140,7 @@ export { UserRoleRepository } from './repositories/user-role.repository';
 export { PermissionCacheService } from './services/permission-cache.service';
 export { PermissionEvaluatorService } from './services/permission-evaluator.service';
 export { RbacService } from './services/rbac.service';
+export { RbacBootstrapService } from './services/rbac-bootstrap.service';
 
 // Controller
 export { RbacController, rbacErrorHandler } from './controllers/rbac.controller';

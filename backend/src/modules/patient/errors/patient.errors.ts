@@ -49,6 +49,26 @@ export class DuplicatePatientError extends PatientError {
   }
 }
 
+/**
+ * Soft 409 — email is shared by another patient, but the caller may
+ * choose to proceed (e.g. family members sharing an inbox).
+ * Carries the conflicting patient's name + id so the UI can surface them.
+ */
+export class DuplicateEmailWarning extends PatientError {
+  constructor(
+    public readonly existingPatientId: string,
+    public readonly existingPatientName: string,
+    email: string,
+  ) {
+    super(
+      `Email ${email} is already associated with patient "${existingPatientName}".`,
+      'EMAIL_IN_USE_WARNING',
+      409,
+      { existingPatientId, existingPatientName, email },
+    );
+  }
+}
+
 export class InvalidPatientStatusTransitionError extends PatientError {
   constructor(from: string, to: string) {
     super(

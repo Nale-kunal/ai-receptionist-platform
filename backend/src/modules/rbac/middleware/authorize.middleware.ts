@@ -96,6 +96,7 @@ export function createRequirePermission(
           resourceTenantId: options.resourceTenantId,
           resourceClinicId: options.resourceClinicId,
         });
+        req.profiler?.markRbacComplete();
         next();
       } catch (err) {
         if (err instanceof UnauthorizedError) {
@@ -127,6 +128,7 @@ export function createRequireRole(
           sendForbidden(res, req.requestId ?? 'unknown');
           return;
         }
+        req.profiler?.markRbacComplete();
         next();
       } catch (err) {
         if (err instanceof UnauthorizedError) {
@@ -154,6 +156,7 @@ export function createRequireAnyPermission(
           sendForbidden(res, req.requestId ?? 'unknown');
           return;
         }
+        req.profiler?.markRbacComplete();
         next();
       } catch (err) {
         if (err instanceof UnauthorizedError) {
@@ -181,6 +184,7 @@ export function createRequireAllPermissions(
           sendForbidden(res, req.requestId ?? 'unknown');
           return;
         }
+        req.profiler?.markRbacComplete();
         next();
       } catch (err) {
         if (err instanceof UnauthorizedError) {

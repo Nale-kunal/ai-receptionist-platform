@@ -17,6 +17,7 @@ function makeController(): AppointmentController {
   return {
     createAppointment:       makeNoop(),
     listAppointments:        makeNoop(),
+    getStatusCounters:       makeNoop(),
     getAppointment:          makeNoop(),
     getAppointmentByPublicId:makeNoop(),
     updateAppointment:       makeNoop(),

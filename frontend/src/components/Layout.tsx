@@ -1,68 +1,200 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { useApp } from '../contexts/AppContext';
+import { useAuth } from '../auth/hooks';
+import { useTheme } from '../contexts/ThemeContext';
+import {
+  PERM_CLINIC_READ,
+  PERM_APPOINTMENT_READ,
+  PERM_CALENDAR_READ,
+  PERM_PATIENT_READ,
+  PERM_CONVERSATION_READ,
+  PERM_USER_READ,
+  PERM_CLINIC_SETTINGS_READ,
+} from '../auth/permissions';
+import { LogoutConfirmationModal } from './auth/LogoutConfirmationModal';
 import {
   LayoutDashboard,
-  PhoneCall,
   Calendar,
   Users,
-  UserCheck,
-  History,
-  FileCode,
-  Sliders,
-  BookOpen,
-  Bell,
+  UserCircle,
+  Bot,
   Settings,
-  ShieldAlert,
   LogOut,
   Sun,
   Moon,
-  Search,
-  Activity,
 } from 'lucide-react';
 
 interface LayoutProps {
   children: React.ReactNode;
 }
 
+interface PrimaryNavItem {
+  id: string;
+  label: string;
+  icon: React.ElementType;
+  path: string;
+  matchPrefix?: string;
+  permission?: string;
+  /** If set, only these roles will see this item */
+  showForRoles?: string[];
+  /** If set, these roles will NOT see this item */
+  hideForRoles?: string[];
+}
+
+// Human-readable page titles for breadcrumb
+const PAGE_TITLES: Record<string, string> = {
+  '/': 'Dashboard',
+  '/dashboard': 'Dashboard',
+  '/appointments': 'Appointments',
+  '/calendar': 'Calendar',
+  '/patients': 'Patients',
+  '/ai-receptionist': 'AI Receptionist',
+  '/ai-receptionist/overview': 'AI Receptionist',
+  '/ai-receptionist/live': 'Live Calls',
+  '/ai-receptionist/history': 'Call History',
+  '/ai-receptionist/knowledge': 'Knowledge Base',
+  '/ai-receptionist/hours': 'Business Hours',
+  '/ai-receptionist/assistant': 'AI Assistant',
+  '/ai-receptionist/advanced': 'Advanced',
+  '/settings': 'Settings',
+  '/settings/practice': 'Practice',
+  '/settings/team': 'Team',
+  '/settings/hours': 'Business Hours',
+  '/settings/billing': 'Billing',
+  '/settings/integrations': 'Integrations',
+  '/settings/security': 'Security',
+  '/settings/advanced': 'Advanced',
+  '/profile': 'Profile',
+  '/onboarding': 'Setup',
+};
+
+function getPageTitle(pathname: string): string {
+  if (PAGE_TITLES[pathname]) return PAGE_TITLES[pathname];
+  // Match prefixes for nested routes
+  for (const [key, title] of Object.entries(PAGE_TITLES)) {
+    if (pathname.startsWith(key) && key !== '/') return title;
+  }
+  return 'Dashboard';
+}
+
+// Simplified role display — customer-facing only
+function getRoleDisplayName(role?: string): string {
+  switch (role) {
+    case 'clinic_owner':
+    case 'admin':
+    case 'tenant_owner':
+      return 'Practice Owner';
+    case 'doctor':
+      return 'Dentist';
+    case 'receptionist':
+      return 'Receptionist';
+    case 'super_admin':
+      return 'Administrator';
+    default:
+      return 'Staff';
+  }
+}
+
 export const Layout: React.FC<LayoutProps> = ({ children }) => {
-  const { user, theme, toggleTheme, logout, tenantId, setTenantId, hasPermission } = useApp();
+  const { user, clinic, logout, hasPermission } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
-  const [showNotifications, setShowNotifications] = useState(false);
 
-  const menuItems = [
-    { id: 'home', label: 'Dashboard Home', icon: LayoutDashboard, path: '/', permission: 'clinic.view' },
-    { id: 'live-calls', label: 'Live Call Center', icon: PhoneCall, path: '/live-calls', permission: 'clinic.view' },
-    { id: 'appointments', label: 'Appointments', icon: Calendar, path: '/appointments', permission: 'appointment.view' },
-    { id: 'patients', label: 'Patients', icon: Users, path: '/patients', permission: 'patient.view' },
-    { id: 'doctors', label: 'Doctors', icon: UserCheck, path: '/doctors', permission: 'doctor.view' },
-    { id: 'calendar', label: 'Calendar Grid', icon: Calendar, path: '/calendar', permission: 'appointment.view' },
-    { id: 'history', label: 'Call Histories', icon: History, path: '/history', permission: 'clinic.view' },
-    { id: 'prompts', label: 'Prompt Engine', icon: FileCode, path: '/prompts', permission: 'prompt.view' },
-    { id: 'ai-config', label: 'AI Settings', icon: Sliders, path: '/ai-config', permission: 'configuration.view' },
-    { id: 'knowledge', label: 'Knowledge Base', icon: BookOpen, path: '/knowledge', permission: 'configuration.view' },
-    { id: 'notifications', label: 'Reminder Rules', icon: Bell, path: '/notifications', permission: 'configuration.view' },
-    { id: 'integrations', label: 'Integrations Link', icon: Settings, path: '/integrations', permission: 'configuration.view' },
-    { id: 'users-rbac', label: 'Users & RBAC', icon: Settings, path: '/users-rbac', permission: 'rbac.role.manage' },
-    { id: 'audit-logs', label: 'Audit Logs', icon: ShieldAlert, path: '/audit-logs', permission: 'audit.view' },
-    { id: 'health', label: 'System Health', icon: Activity, path: '/health', permission: 'health.view' },
-  ];
+  const [showLogoutModal, setShowLogoutModal] = React.useState(false);
+  const [isLoggingOut, setIsLoggingOut] = React.useState(false);
 
-  const getBreadcrumbs = () => {
-    const paths = location.pathname.split('/').filter(Boolean);
-    if (paths.length === 0) return ['Dashboard', 'Home'];
-    return ['Dashboard', ...paths.map((p) => p.charAt(0).toUpperCase() + p.slice(1))];
+  const userRole = user?.role || '';
+
+  const handleLogoutConfirm = async () => {
+    setIsLoggingOut(true);
+    try {
+      await logout();
+      navigate('/login', { replace: true });
+    } finally {
+      setIsLoggingOut(false);
+      setShowLogoutModal(false);
+    }
   };
 
-  const activeTenantName = tenantId === 'tenant_dental_first' ? 'Dental First Clinic' : 'Metro Orthodontics';
+  // Role-aware primary navigation — max 6 items visible per role
+  const primaryMenuItems: PrimaryNavItem[] = [
+    {
+      id: 'dashboard',
+      label: userRole === 'doctor' ? "Today's Schedule" : 'Dashboard',
+      icon: LayoutDashboard,
+      path: '/',
+      permission: PERM_CLINIC_READ,
+    },
+    {
+      id: 'appointments',
+      label: 'Appointments',
+      icon: Calendar,
+      path: '/appointments',
+      permission: PERM_APPOINTMENT_READ,
+      hideForRoles: ['doctor'],
+    },
+    {
+      id: 'patients',
+      label: 'Patients',
+      icon: Users,
+      path: '/patients',
+      permission: PERM_PATIENT_READ,
+    },
+    {
+      id: 'ai-receptionist',
+      label: 'AI Receptionist',
+      icon: Bot,
+      path: '/ai-receptionist/overview',
+      matchPrefix: '/ai-receptionist',
+      permission: PERM_CONVERSATION_READ,
+      hideForRoles: ['doctor'],
+    },
+    {
+      id: 'calendar',
+      label: 'Calendar',
+      icon: Calendar,
+      path: '/calendar',
+      permission: PERM_CALENDAR_READ,
+      showForRoles: ['doctor', 'receptionist'],
+    },
+    {
+      id: 'settings',
+      label: 'Settings',
+      icon: Settings,
+      path: '/settings/practice',
+      matchPrefix: '/settings',
+      permission: PERM_CLINIC_SETTINGS_READ,
+      hideForRoles: ['doctor', 'receptionist'],
+    },
+    {
+      id: 'profile',
+      label: 'Profile',
+      icon: UserCircle,
+      path: '/profile',
+    },
+  ];
+
+  // Filter nav items by role and permission
+  const visibleMenuItems = primaryMenuItems.filter((item) => {
+    // Permission check
+    if (item.permission && !hasPermission(item.permission)) return false;
+    // Role whitelist
+    if (item.showForRoles && !item.showForRoles.includes(userRole)) return false;
+    // Role blacklist
+    if (item.hideForRoles && item.hideForRoles.includes(userRole)) return false;
+    return true;
+  });
+
+  const clinicName = clinic?.name || 'My Practice';
+  const pageTitle = getPageTitle(location.pathname);
 
   return (
     <div className="flex w-full" style={{ minHeight: '100vh', backgroundColor: 'var(--bg-secondary)' }}>
-      {/* 1. Left Sidebar Navigation */}
+      {/* Sidebar Navigation */}
       <aside
         style={{
-          width: '260px',
+          width: '240px',
           backgroundColor: 'var(--bg-primary)',
           borderRight: '1px solid var(--border-color)',
           display: 'flex',
@@ -70,8 +202,10 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
           position: 'sticky',
           top: 0,
           height: '100vh',
+          zIndex: 10,
         }}
       >
+        {/* Brand Header */}
         <div
           style={{
             padding: '20px',
@@ -83,58 +217,67 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
         >
           <div
             style={{
-              width: '32px',
-              height: '32px',
-              borderRadius: '6px',
-              backgroundColor: 'var(--primary)',
+              width: '36px',
+              height: '36px',
+              borderRadius: '10px',
+              background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               color: '#fff',
               fontWeight: 700,
+              fontSize: '1.1rem',
+              boxShadow: '0 2px 8px rgba(99, 102, 241, 0.3)',
+              flexShrink: 0,
             }}
           >
-            D
+            {clinicName.charAt(0).toUpperCase()}
           </div>
-          <div>
-            <h4 style={{ fontSize: '0.925rem', fontWeight: 600 }}>Dental AI SaaS</h4>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Enterprise v1.0</span>
+          <div style={{ overflow: 'hidden' }}>
+            <h4
+              style={{
+                fontSize: '0.9rem',
+                fontWeight: 700,
+                margin: 0,
+                color: 'var(--text-primary)',
+                whiteSpace: 'nowrap',
+                textOverflow: 'ellipsis',
+                overflow: 'hidden',
+              }}
+            >
+              {clinicName}
+            </h4>
+            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>AI Receptionist</span>
           </div>
         </div>
 
-        {/* Tenant Switcher Section */}
-        <div style={{ padding: '12px 20px', borderBottom: '1px solid var(--border-color)' }}>
-          <label style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
-            Active Tenant
-          </label>
-          <select
-            value={tenantId}
-            onChange={(e) => setTenantId(e.target.value)}
-            className="input"
-            style={{ marginTop: '4px', padding: '4px 8px', fontSize: '0.8rem' }}
-          >
-            <option value="tenant_dental_first">Dental First Clinic</option>
-            <option value="tenant_metro_ortho">Metro Orthodontics</option>
-          </select>
-        </div>
+        {/* Navigation Menu */}
+        <nav style={{ flexGrow: 1, padding: '12px 10px', overflowY: 'auto' }}>
+          <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            {visibleMenuItems.map((item) => {
+              const isActive = item.matchPrefix
+                ? location.pathname.startsWith(item.matchPrefix)
+                : location.pathname === item.path;
 
-        {/* Navigation list */}
-        <nav style={{ flexGrow: 1, padding: '16px 12px', overflowY: 'auto' }}>
-          <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-            {menuItems.map((item) => {
-              if (!hasPermission(item.permission)) return null;
-              const isActive = location.pathname === item.path;
               const Icon = item.icon;
               return (
                 <li key={item.id}>
                   <button
                     onClick={() => navigate(item.path)}
+                    onMouseEnter={() => {
+                      if (item.path.startsWith('/appointments')) import('../pages/Appointments');
+                      else if (item.path.startsWith('/patients')) import('../pages/Patients');
+                      else if (item.path.startsWith('/calendar')) import('../pages/CalendarPage');
+                      else if (item.path.startsWith('/ai-receptionist')) import('../pages/ai/AiReceptionistHub');
+                      else if (item.path.startsWith('/settings')) import('../pages/settings/SettingsHub');
+                      else if (item.path.startsWith('/profile')) import('../pages/UserProfile');
+                    }}
                     style={{
                       width: '100%',
                       display: 'flex',
                       alignItems: 'center',
                       gap: '10px',
-                      padding: '10px 12px',
+                      padding: '9px 12px',
                       borderRadius: 'var(--radius)',
                       border: 'none',
                       backgroundColor: isActive ? 'var(--primary-light)' : 'transparent',
@@ -155,52 +298,71 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
           </ul>
         </nav>
 
-        {/* User logout section */}
+        {/* User Account Footer */}
         <div
           style={{
-            padding: '16px 20px',
+            padding: '12px 14px',
             borderTop: '1px solid var(--border-color)',
-            backgroundColor: 'var(--bg-secondary)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            backgroundColor: 'var(--bg-primary)',
           }}
         >
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <p style={{ fontSize: '0.825rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                {user?.email}
-              </p>
-              <span style={{ fontSize: '0.75rem', color: 'var(--primary)', textTransform: 'capitalize', fontWeight: 500 }}>
-                {user?.role.replace('_', ' ')}
-              </span>
-            </div>
-            <button
-              onClick={toggleTheme}
+          <div style={{ overflow: 'hidden' }}>
+            <p
               style={{
-                background: 'none',
-                border: 'none',
-                cursor: 'pointer',
-                color: 'var(--text-secondary)',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                margin: 0,
+                whiteSpace: 'nowrap',
+                textOverflow: 'ellipsis',
+                overflow: 'hidden',
+                color: 'var(--text-primary)',
               }}
             >
-              {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
-            </button>
+              {user?.firstName
+                ? `${user.firstName} ${user.lastName || ''}`
+                : user?.email || 'User'}
+            </p>
+            <span
+              style={{
+                fontSize: '0.65rem',
+                padding: '1px 6px',
+                marginTop: '3px',
+                display: 'inline-block',
+                backgroundColor: 'var(--primary-light)',
+                color: 'var(--primary)',
+                fontWeight: 600,
+                borderRadius: '10px',
+              }}
+            >
+              {getRoleDisplayName(userRole)}
+            </span>
           </div>
           <button
-            onClick={logout}
-            className="btn btn-secondary w-full"
-            style={{ padding: '6px 12px', fontSize: '0.825rem', display: 'flex', gap: '8px', justifyContent: 'center' }}
+            onClick={() => setShowLogoutModal(true)}
+            title="Sign Out"
+            style={{
+              padding: '6px',
+              borderRadius: '6px',
+              border: 'none',
+              backgroundColor: 'transparent',
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+            }}
           >
             <LogOut size={16} />
-            <span>Sign Out</span>
           </button>
         </div>
       </aside>
 
-      {/* 2. Right Main Layout Window */}
-      <div style={{ flexGrow: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        {/* Top Header Navbar */}
+      {/* Main Content */}
+      <main style={{ flexGrow: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        {/* Top Header Bar */}
         <header
           style={{
-            height: '60px',
+            height: '56px',
             backgroundColor: 'var(--bg-primary)',
             borderBottom: '1px solid var(--border-color)',
             display: 'flex',
@@ -209,123 +371,47 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
             padding: '0 24px',
             position: 'sticky',
             top: 0,
-            zIndex: 10,
+            zIndex: 5,
           }}
         >
-          {/* Breadcrumbs */}
-          <div className="flex items-center gap-2" style={{ fontSize: '0.875rem' }}>
-            {getBreadcrumbs().map((crumb, idx, arr) => (
-              <React.Fragment key={idx}>
-                <span
-                  style={{
-                    color: idx === arr.length - 1 ? 'var(--text-primary)' : 'var(--text-muted)',
-                    fontWeight: idx === arr.length - 1 ? 600 : 400,
-                  }}
-                >
-                  {crumb}
-                </span>
-                {idx < arr.length - 1 && <span style={{ color: 'var(--text-muted)' }}>/</span>}
-              </React.Fragment>
-            ))}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+            <span>{clinicName}</span>
+            <span style={{ opacity: 0.5 }}>/</span>
+            <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{pageTitle}</span>
           </div>
 
-          {/* Action Toolbar */}
-          <div className="flex items-center gap-4">
-            {/* Global Search Simulator */}
-            <div style={{ position: 'relative', width: '220px' }}>
-              <Search
-                size={16}
-                style={{
-                  position: 'absolute',
-                  left: '10px',
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  color: 'var(--text-muted)',
-                }}
-              />
-              <input
-                type="text"
-                placeholder="Global search..."
-                className="input"
-                style={{ paddingLeft: '32px', height: '32px' }}
-              />
-            </div>
-
-            {/* Notification Drawer Button */}
-            <div style={{ position: 'relative' }}>
-              <button
-                onClick={() => setShowNotifications(!showNotifications)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: 'var(--text-secondary)',
-                  position: 'relative',
-                  padding: '4px',
-                }}
-              >
-                <Bell size={20} />
-                <span
-                  style={{
-                    position: 'absolute',
-                    top: '2px',
-                    right: '2px',
-                    width: '6px',
-                    height: '6px',
-                    borderRadius: '50%',
-                    backgroundColor: 'var(--error)',
-                  }}
-                />
-              </button>
-
-              {/* Notification drop menu */}
-              {showNotifications && (
-                <div
-                  className="card"
-                  style={{
-                    position: 'absolute',
-                    top: '36px',
-                    right: 0,
-                    width: '280px',
-                    padding: '16px',
-                    boxShadow: 'var(--shadow-lg)',
-                    zIndex: 20,
-                  }}
-                >
-                  <h4 style={{ fontSize: '0.875rem', marginBottom: '12px' }}>Recent Notifications</h4>
-                  <ul style={{ listStyle: 'none', fontSize: '0.8rem', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    <li style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '6px' }}>
-                      <p style={{ fontWeight: 500 }}>Appointment Confirmed</p>
-                      <span style={{ color: 'var(--text-secondary)' }}>Alice Green - Dr. House</span>
-                    </li>
-                    <li>
-                      <p style={{ fontWeight: 500 }}>System Status Alert</p>
-                      <span style={{ color: 'var(--text-secondary)' }}>All voice servers are running.</span>
-                    </li>
-                  </ul>
-                </div>
-              )}
-            </div>
-
-            <div
-              style={{
-                height: '32px',
-                padding: '4px 12px',
-                borderRadius: '9999px',
-                backgroundColor: 'var(--bg-tertiary)',
-                fontSize: '0.8rem',
-                fontWeight: 600,
-                color: 'var(--text-secondary)',
-              }}
-            >
-              {activeTenantName}
-            </div>
-          </div>
+          <button
+            onClick={toggleTheme}
+            style={{
+              padding: '7px',
+              borderRadius: '50%',
+              border: '1px solid var(--border-color)',
+              backgroundColor: 'transparent',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+          >
+            {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
         </header>
 
-        {/* Page Content Container */}
-        <main style={{ flexGrow: 1, padding: '32px', overflowY: 'auto' }}>{children}</main>
-      </div>
+        {/* Dynamic Page Body */}
+        <div style={{ padding: '24px', flexGrow: 1, overflowY: 'auto' }}>
+          {children}
+        </div>
+      </main>
+
+      {/* Logout Confirmation Modal */}
+      <LogoutConfirmationModal
+        isOpen={showLogoutModal}
+        onClose={() => setShowLogoutModal(false)}
+        onConfirm={handleLogoutConfirm}
+        isLoggingOut={isLoggingOut}
+      />
     </div>
   );
 };

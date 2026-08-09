@@ -52,6 +52,26 @@ declare global {
  * @param sessionService - For session activity validation
  * @param userRepository - For token version check
  */
+interface CachedAuthValidation {
+  tokenVersion: number;
+  expiresAt: number;
+}
+
+const authValidationCache = new Map<string, CachedAuthValidation>();
+const AUTH_CACHE_TTL_MS = 2000;
+
+export function invalidateAuthCache(userId?: string): void {
+  if (userId) {
+    for (const key of authValidationCache.keys()) {
+      if (key.startsWith(`${userId}:`)) {
+        authValidationCache.delete(key);
+      }
+    }
+  } else {
+    authValidationCache.clear();
+  }
+}
+
 export function createAuthenticateMiddleware(
   tokenService: TokenService,
   sessionService: SessionService,
@@ -100,55 +120,66 @@ export function createAuthenticateMiddleware(
         throw err;
       }
 
-      // Step 3 — Validate token version against database
-      const user = await userRepository.findById(payload.sub);
-      if (!user) {
-        res.status(401).json({
-          success: false,
-          error: {
-            code: 'AUTH_INVALID_ACCESS_TOKEN',
-            message: 'Authentication required.',
-            details: [],
-          },
-          requestId: req.requestId ?? '',
-        });
-        return;
-      }
+      const cacheKey = `${payload.sub}:${payload.sessionId}`;
+      const now = Date.now();
+      const cached = authValidationCache.get(cacheKey);
 
-      if (user.tokenVersion !== payload.tokenVersion) {
-        res.status(401).json({
-          success: false,
-          error: {
-            code: 'AUTH_TOKEN_VERSION_MISMATCH',
-            message: 'The token is no longer valid. Please log in again.',
-            details: [],
-          },
-          requestId: req.requestId ?? '',
-        });
-        return;
-      }
-
-      // Step 4 — Validate session is active
-      try {
-        await sessionService.validateActiveSession(payload.sessionId);
-      } catch (err) {
-        if (
-          err instanceof SessionInactiveError ||
-          err instanceof SessionExpiredError ||
-          err instanceof SessionNotFoundError
-        ) {
+      if (!cached || cached.expiresAt <= now || cached.tokenVersion !== payload.tokenVersion) {
+        // Step 3 — Validate token version against database
+        const user = await userRepository.findById(payload.sub);
+        if (!user) {
           res.status(401).json({
             success: false,
             error: {
-              code: (err as any).code,
-              message: err.message,
+              code: 'AUTH_INVALID_ACCESS_TOKEN',
+              message: 'Authentication required.',
               details: [],
             },
             requestId: req.requestId ?? '',
           });
           return;
         }
-        throw err;
+
+        if (user.tokenVersion !== payload.tokenVersion) {
+          res.status(401).json({
+            success: false,
+            error: {
+              code: 'AUTH_TOKEN_VERSION_MISMATCH',
+              message: 'The token is no longer valid. Please log in again.',
+              details: [],
+            },
+            requestId: req.requestId ?? '',
+          });
+          return;
+        }
+
+        // Step 4 — Validate session is active
+        try {
+          await sessionService.validateActiveSession(payload.sessionId);
+        } catch (err) {
+          if (
+            err instanceof SessionInactiveError ||
+            err instanceof SessionExpiredError ||
+            err instanceof SessionNotFoundError
+          ) {
+            res.status(401).json({
+              success: false,
+              error: {
+                code: (err as any).code,
+                message: err.message,
+                details: [],
+              },
+              requestId: req.requestId ?? '',
+            });
+            return;
+          }
+          throw err;
+        }
+
+        authValidationCache.set(cacheKey, {
+          tokenVersion: user.tokenVersion,
+          expiresAt: now + AUTH_CACHE_TTL_MS,
+        });
       }
 
       // Step 5 — Update session activity (fire-and-forget)
@@ -165,6 +196,14 @@ export function createAuthenticateMiddleware(
         email: payload.email,
       };
 
+      if (req.context) {
+        req.context.user = req.user;
+        req.context.tenantId = payload.tenantId;
+        req.context.clinicId = payload.clinicId;
+        req.context.roles = [payload.role];
+      }
+
+      req.profiler?.markAuthComplete();
       next();
     } catch (error) {
       next(error);

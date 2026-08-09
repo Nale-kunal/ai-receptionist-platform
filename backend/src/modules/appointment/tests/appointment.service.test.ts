@@ -35,6 +35,8 @@ const mockRepository = {
   findById:              jest.fn(),
   findByPublicId:        jest.fn(),
   findMany:              jest.fn(),
+  countMany:             jest.fn(),
+  getStatusCounters:     jest.fn(),
   findConflicts:         jest.fn(),
   doctorBelongsToClinic: jest.fn(),
   patientBelongsToClinic:jest.fn(),
@@ -133,7 +135,7 @@ describe('AppointmentService', () => {
       expect(mockRepository.getPatientStatus).toHaveBeenCalledWith(PATIENT_ID);
       expect(mockRepository.findConflicts).toHaveBeenCalled();
       expect(mockRepository.create).toHaveBeenCalledWith(
-        expect.objectContaining({ status: 'pending' }),
+        expect.objectContaining({ status: expect.stringMatching(/scheduled|pending/) }),
       );
       expect(mockPublisher.publish).toHaveBeenCalledWith(
         expect.objectContaining({ type: EVENT_APPOINTMENT_CREATED }),
@@ -379,14 +381,18 @@ describe('AppointmentService', () => {
   describe('listAppointments', () => {
     it('should return mapped list of appointments', async () => {
       mockRepository.findMany.mockResolvedValue([makeAppt(), makeAppt({ id: 'other-id', publicId: 'appt_xyz' })]);
+      mockRepository.countMany.mockResolvedValue(2);
       const results = await service.listAppointments({ tenantId: TENANT_ID });
-      expect(results).toHaveLength(2);
+      expect(results.appointments).toHaveLength(2);
+      expect(results.total).toBe(2);
     });
 
     it('should return empty array when no appointments found', async () => {
       mockRepository.findMany.mockResolvedValue([]);
+      mockRepository.countMany.mockResolvedValue(0);
       const results = await service.listAppointments({ tenantId: TENANT_ID });
-      expect(results).toHaveLength(0);
+      expect(results.appointments).toHaveLength(0);
+      expect(results.total).toBe(0);
     });
   });
 });

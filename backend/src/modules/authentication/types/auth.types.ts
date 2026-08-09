@@ -93,6 +93,8 @@ export interface LoginResult {
   refreshToken: string;
   refreshTokenExpiresAt: Date;
   user: SafeUser;
+  roles?: string[];
+  permissions?: string[];
 }
 
 // --------------------------------------------------------------------------

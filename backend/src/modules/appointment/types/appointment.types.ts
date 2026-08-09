@@ -18,6 +18,8 @@ export interface SafeAppointment {
 
   startTime: Date;
   endTime: Date;
+  durationMinutes?: number;
+  appointmentType?: string;
   timezone: string;
   status: AppointmentStatus;
   source: AppointmentSource;
@@ -29,4 +31,8 @@ export interface SafeAppointment {
   createdAt: Date;
   updatedAt: Date;
   deletedAt: Date | null;
+
+  patientName?: string;
+  patientPhone?: string;
+  doctorName?: string;
 }

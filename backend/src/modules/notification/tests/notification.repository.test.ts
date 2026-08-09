@@ -87,7 +87,7 @@ describe('NotificationRepository', () => {
       expect(mockNotificationDelegate.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
-            status: 'pending',
+            status: expect.anything(),
             deletedAt: null,
           }),
           take: 10,

@@ -79,6 +79,7 @@ describe('AppointmentRepository', () => {
       await repo.findById(APPT_ID);
       expect(mockAppointmentDelegate.findFirst).toHaveBeenCalledWith({
         where: { id: APPT_ID, deletedAt: null },
+        include: { patient: true, doctor: true },
       });
     });
 
@@ -87,6 +88,7 @@ describe('AppointmentRepository', () => {
       await repo.findById(APPT_ID, true);
       expect(mockAppointmentDelegate.findFirst).toHaveBeenCalledWith({
         where: { id: APPT_ID },
+        include: { patient: true, doctor: true },
       });
     });
   });

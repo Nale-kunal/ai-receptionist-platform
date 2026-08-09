@@ -77,6 +77,7 @@ describe('Authorization Middleware', () => {
       mockPermissionRepository as any,
       cache,
       publisher,
+      { enableTransitionalFallback: false },
     );
   });
 

@@ -12,6 +12,7 @@ export const RescheduleAppointmentSchema = z
     endTime: z
       .string({ required_error: 'End time is required' })
       .datetime({ message: 'endTime must be an ISO 8601 datetime string' }),
+    durationMinutes: z.number().int().positive().optional(),
     timezone: z.string().min(1).max(64).optional(),
     notes: z.string().max(2000).nullable().optional(),
   })

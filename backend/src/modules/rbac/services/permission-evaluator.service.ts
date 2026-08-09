@@ -34,7 +34,7 @@ import type {
   AnyPermissionCheckInput,
   AllPermissionsCheckInput,
 } from '../types/rbac.types';
-import { OUTCOME_GRANTED, OUTCOME_DENIED } from '../constants/rbac.constants';
+import { OUTCOME_GRANTED, OUTCOME_DENIED, SYSTEM_ROLE_PERMISSIONS_MAP, ROLE_CLINIC_OWNER } from '../constants/rbac.constants';
 import {
   ForbiddenError,
   TenantIsolationViolationError,
@@ -48,6 +48,7 @@ export class PermissionEvaluatorService implements IPermissionEvaluator {
     private readonly permissionRepository: PermissionRepository,
     private readonly cache: PermissionCacheService,
     private readonly eventPublisher: RbacEventPublisher,
+    private readonly options: { enableTransitionalFallback?: boolean } = {},
   ) {}
 
   // --------------------------------------------------------------------------
@@ -156,27 +157,27 @@ export class PermissionEvaluatorService implements IPermissionEvaluator {
     const cached = this.cache.get(cacheKey);
     if (cached) return cached;
 
-    // Cache miss — resolve from DB
+    // Cache miss — resolve primary permissions from DB (user_roles table)
     const roleIds = await this.userRoleRepository.findActiveRoleIds(
       context.userId,
       context.tenantId,
     );
 
     let permissions: Set<string>;
+    let roleNames: string[];
 
     if (roleIds.length === 0) {
-      // No roles assigned — empty permission set (default deny)
+      // Strict Default Deny — No active role assignments in user_roles table
       permissions = new Set();
+      roleNames = [];
     } else {
       permissions = await this.permissionRepository.findPermissionNamesForRoles(roleIds);
+      const userRolesWithRole = await this.userRoleRepository.findActiveByUser(
+        context.userId,
+        context.tenantId,
+      );
+      roleNames = userRolesWithRole.map((ur) => ur.role.name);
     }
-
-    // Resolve role names for this context
-    const userRolesWithRole = await this.userRoleRepository.findActiveByUser(
-      context.userId,
-      context.tenantId,
-    );
-    const roleNames = userRolesWithRole.map((ur) => ur.role.name);
 
     const resolved: ResolvedPermissions = {
       userId: context.userId,

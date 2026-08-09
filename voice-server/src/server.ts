@@ -22,8 +22,14 @@ import { TwilioAuditLogger } from './providers/twilio/twilio.audit.logger';
 import { VoiceSessionManager } from './sessions/voice-session.manager';
 import { VoiceConnectionManager } from './services/voice-connection.manager';
 import { DEFAULT_VOICE_SERVER_CONFIG } from './config/voice-server.config';
+import { validateEnv } from './config/env.validator';
+import { setupLogRedaction } from './utils/redactor';
 
 async function bootstrap(): Promise<void> {
+  // ── Global log redaction and environment checks ───────────────────────────
+  setupLogRedaction();
+  validateEnv();
+
   const PORT = parseInt(process.env['PORT'] ?? '5000', 10);
 
   // 1. Configurations
@@ -134,6 +140,14 @@ async function bootstrap(): Promise<void> {
 
   // Twilio HTTP routes
   app.use(createTwilioWebhookRoutes(webhookController));
+
+  // Global HTTP error handler for Twilio webhooks
+  app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('[voice-server] Unhandled webhook error:', err);
+    res.status(500).type('text/xml').send(
+      `<?xml version="1.0" encoding="UTF-8"?><Response><Reject reason="busy"/></Response>`
+    );
+  });
 
   // 5. Create HTTP Server
   const server = http.createServer(app);

@@ -10,10 +10,12 @@ export const ListAppointmentsSchema = z.object({
   doctorId:  z.string().uuid().optional(),
   patientId: z.string().uuid().optional(),
   publicId:  z.string().optional(),
+  search:    z.string().optional(),
   status:    z.enum(APPOINTMENT_STATUSES).optional(),
   source:    z.enum(APPOINTMENT_SOURCES).optional(),
   startFrom: z.string().datetime().optional(),
   startTo:   z.string().datetime().optional(),
+  page:      z.coerce.number().int().min(1).default(1),
   limit:     z.coerce.number().int().min(1).max(100).default(20),
   offset:    z.coerce.number().int().min(0).default(0),
 });

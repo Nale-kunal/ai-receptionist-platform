@@ -3,10 +3,10 @@
  */
 
 import { z } from 'zod';
-import { CreatePatientSchema } from './create-patient.validator';
+import { RawCreatePatientSchema } from './create-patient.validator';
 
-export const UpdatePatientSchema = CreatePatientSchema.partial().refine(
-  (data) => {
+export const UpdatePatientSchema = RawCreatePatientSchema.partial().refine(
+  (data: Record<string, unknown>) => {
     // Ensure at least one update property is defined
     return Object.keys(data).length > 0;
   },

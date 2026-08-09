@@ -56,10 +56,32 @@ export const HolidaySchema = z.object({
   name: z.string().min(1, 'Holiday name cannot be empty'),
 });
 
+// Detailed schedule item (frontend UI format — day-name based)
+const DetailedScheduleItemSchema = z.object({
+  day: z.string().min(1),
+  startTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'Must be HH:mm format').optional(),
+  endTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'Must be HH:mm format').optional(),
+  isClosed: z.boolean().optional(),
+});
+
 export const BusinessSettingsSchema = z.object({
-  businessHours: z.array(BusinessHourSchema),
+  // Structured array format (canonical DB format — dayOfWeek number based)
+  businessHours: z.array(BusinessHourSchema).optional().default([]),
+
+  // Structured schedule alias used by clinic settings UI (same schema, named differently)
+  businessHoursSchedule: z.array(BusinessHourSchema).optional(),
+
+  // Day-name schedule from SettingsHub UI (e.g. [{day: "Monday", startTime: "09:00", ...}])
+  detailedSchedule: z.array(DetailedScheduleItemSchema).optional(),
+
+  // Working day names ["Monday","Tuesday",...] toggle from settings
+  workingDays: z.array(z.string()).optional(),
+
+  // Display-only label for AI rules e.g. "Mon-Fri 09:00-17:00"
+  businessHoursLabel: z.string().optional(),
+
   holidays: z.array(HolidaySchema).default([]),
-  appointmentDuration: z.number().int().min(5).max(240),
+  appointmentDuration: z.number().int().min(5).max(240).optional().default(30),
   bookingRules: z
     .object({
       minAdvanceHours: z.number().int().nonnegative().optional(),
@@ -76,6 +98,16 @@ export const BusinessSettingsSchema = z.object({
       minNoticeHours: z.number().int().nonnegative().optional(),
     })
     .optional(),
+  // Clinic identity fields stored alongside hours for convenience
+  clinicName: z.string().optional(),
+  contactPhone: z.string().optional(),
+  contactEmail: z.string().email().optional(),
+  address: z.string().optional(),
+  timezone: z.string().optional(),
+  aiGreeting: z.string().optional(),
+  bookingRulesText: z.string().optional(),
+  cancellationRulesText: z.string().optional(),
+  holidaySchedule: z.string().optional(),
 });
 
 export const VoiceSettingsSchema = z.object({

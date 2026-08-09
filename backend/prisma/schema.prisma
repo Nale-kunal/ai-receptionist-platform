@@ -68,6 +68,11 @@ model Tenant {
   aiAuditLogs    AiAuditLog[]
   promptTemplates PromptTemplate[]
   promptAuditLogs PromptAuditLog[]
+  faqs            Faq[]
+  invitations     Invitation[]
+  whatsappIntegrations WhatsAppIntegration[]
+  whatsappJobs     WhatsAppJob[]
+  whatsappMessages WhatsAppMessage[]
 
   @@index([status])
   @@index([slug])
@@ -111,9 +116,11 @@ model User {
   passwordResetTokens PasswordResetToken[]
   emailVerificationTokens EmailVerificationToken[]
   userRoles UserRole[]
+  sentInvitations Invitation[] @relation("SentInvitations")
 
   @@index([email])
   @@index([tenantId])
+  @@index([tenantId, deletedAt, status])
   @@map("users")
 }
 
@@ -126,7 +133,9 @@ model Session {
   userId   String @map("user_id")   @db.Uuid
   tenantId String @map("tenant_id") @db.Uuid
 
-  refreshTokenHash String @map("refresh_token_hash")
+  refreshTokenHash         String    @map("refresh_token_hash")
+  previousRefreshTokenHash String?   @map("previous_refresh_token_hash")
+  rotatedAt                DateTime? @map("rotated_at")
 
   userAgent       String  @map("user_agent")
   ipAddress       String  @map("ip_address")
@@ -146,6 +155,7 @@ model Session {
 
   @@index([userId])
   @@index([status])
+  @@index([userId, status])
   @@map("sessions")
 }
 
@@ -193,6 +203,40 @@ model EmailVerificationToken {
   @@index([tokenHash])
   @@index([userId])
   @@map("email_verification_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Invitation — Team Staff Invitations
+// ---------------------------------------------------------------------------
+
+model Invitation {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  email           String
+  type            String    @default("new_user")
+  currentRoleName String?   @map("current_role_name")
+  roleName        String    @map("role_name")
+  tokenHash       String    @unique @map("token_hash")
+  invitedByUserId String    @map("invited_by_user_id") @db.Uuid
+  status          String    @default("pending")
+  expiresAt       DateTime  @map("expires_at")
+  viewedAt        DateTime? @map("viewed_at")
+  acceptedAt      DateTime? @map("accepted_at")
+  declinedAt      DateTime? @map("declined_at")
+  resentAt        DateTime? @map("resent_at")
+  revokedAt       DateTime? @map("revoked_at")
+  usedAt          DateTime? @map("used_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id])
+  invitedBy User   @relation("SentInvitations", fields: [invitedByUserId], references: [id])
+
+  @@index([tokenHash])
+  @@index([tenantId, email])
+  @@index([status])
+  @@index([type])
+  @@map("invitations")
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +455,9 @@ model Clinic {
   calendarConnections CalendarConnection[]
   promptTemplates PromptTemplate[]
   promptAuditLogs PromptAuditLog[]
+  whatsappIntegrations WhatsAppIntegration[]
+  whatsappJobs     WhatsAppJob[]
+  whatsappMessages WhatsAppMessage[]
 
   @@index([tenantId])
   @@index([ownerId])
@@ -472,6 +519,9 @@ model Patient {
   clinicId               String    @map("clinic_id") @db.Uuid
 
   fullName               String    @map("full_name")
+  firstName              String?   @map("first_name")
+  lastName               String?   @map("last_name")
+  mrn                    String?   @map("mrn")
   phone                  String
   email                  String?
   dateOfBirth            DateTime? @map("date_of_birth")
@@ -480,6 +530,8 @@ model Patient {
   preferredContactMethod String    @default("sms") @map("preferred_contact_method")
   status                 String    @default("active")
   emergencyContact       Json?     @map("emergency_contact")
+  address                Json?     @map("address")
+  notes                  String?   @map("notes")
   smsEnabled             Boolean   @default(true) @map("sms_enabled")
   emailEnabled           Boolean   @default(true) @map("email_enabled")
 
@@ -499,6 +551,8 @@ model Patient {
   @@index([status])
   @@index([fullName])
   @@index([phone])
+  @@index([mrn])
+  @@index([email])
   @@map("patients")
 }
 
@@ -517,12 +571,16 @@ model Appointment {
   startTime          DateTime  @map("start_time")
   endTime            DateTime  @map("end_time")
   timezone           String    @default("UTC")
-  status             String    @default("pending")
+  status             String    @default("scheduled")
   source             String    @default("dashboard")
+  appointmentType    String    @default("checkup") @map("appointment_type")
+  durationMinutes    Int       @default(30) @map("duration_minutes")
 
   notes              String?   @map("notes")
   cancellationReason String?   @map("cancellation_reason")
   cancelledAt        DateTime? @map("cancelled_at")
+  cancelledByUserId  String?   @map("cancelled_by_user_id") @db.Uuid
+  cancelledByType    String?   @map("cancelled_by_type")
 
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt      @map("updated_at")
@@ -544,8 +602,11 @@ model Appointment {
   @@index([startTime])
   @@index([status])
   @@index([publicId])
-  // Composite indexes for scheduling queries
+  // Composite indexes for scheduling and dashboard queries
+  @@index([tenantId, deletedAt, startTime])
+  @@index([tenantId, status])
   @@index([doctorId, startTime])
+  @@index([doctorId, startTime, endTime, status])
   @@index([clinicId, startTime])
   @@index([patientId, startTime])
   @@map("appointments")
@@ -564,7 +625,11 @@ model Conversation {
   doctorId            String?   @map("doctor_id") @db.Uuid
   appointmentId       String?   @map("appointment_id") @db.Uuid
 
-  // Call session identity
+  // Channel — which communication channel originated this conversation
+  channel             String    @default("voice")    // 'voice' | 'whatsapp' | 'web'
+  channelIdentifier   String?   @map("channel_identifier") // E.164 phone (WhatsApp contact), caller ID, etc.
+
+  // Call session identity (voice channel)
   callSessionId       String    @map("call_session_id")
   callerPhone         String?   @map("caller_phone")
 
@@ -584,8 +649,14 @@ model Conversation {
   // AI output
   summary             Json?     @map("summary")
   extractedEntities   Json?     @map("extracted_entities")
-  intent              String?
+  intent              String?   @default("general_inquiry")
   sentiment           String?
+
+  // Quality metrics
+  userSentiment       String?   @map("user_sentiment")
+  bookingSuccess      Boolean   @default(false) @map("booking_success")
+  escalatedToHuman    Boolean   @default(false) @map("escalated_to_human")
+  handoffReason       String?   @map("handoff_reason")
 
   // Recording reference (metadata only, not the file)
   recordingReference  String?   @map("recording_reference")
@@ -601,7 +672,7 @@ model Conversation {
   aiProvider          String?   @map("ai_provider")
 
   // Arbitrary metadata
-  metadata            Json?     @default("{}")
+  metadata            Json      @default("{}")
 
   createdAt           DateTime  @default(now()) @map("created_at")
   updatedAt           DateTime  @updatedAt      @map("updated_at")
@@ -625,6 +696,8 @@ model Conversation {
   @@index([status])
   @@index([intent])
   @@index([publicId])
+  @@index([tenantId, startedAt(sort: Desc)])
+  @@index([clinicId, createdAt])
   @@map("conversations")
 }
 
@@ -636,7 +709,7 @@ model Notification {
   id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   publicId         String    @unique @default(dbgenerated("'ntf_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
   tenantId         String    @map("tenant_id") @db.Uuid
-  clinicId         String    @map("clinic_id") @db.Uuid
+  clinicId         String?   @map("clinic_id") @db.Uuid
   patientId        String?   @map("patient_id") @db.Uuid
   appointmentId    String?   @map("appointment_id") @db.Uuid
   conversationId   String?   @map("conversation_id") @db.Uuid
@@ -666,7 +739,7 @@ model Notification {
   deletedAt        DateTime? @map("deleted_at")
 
   tenant       Tenant        @relation(fields: [tenantId],      references: [id])
-  clinic       Clinic        @relation(fields: [clinicId],      references: [id])
+  clinic       Clinic?       @relation(fields: [clinicId],      references: [id])
   patient      Patient?      @relation(fields: [patientId],     references: [id])
   appointment  Appointment?  @relation(fields: [appointmentId], references: [id])
   conversation Conversation? @relation(fields: [conversationId], references: [id])
@@ -681,6 +754,101 @@ model Notification {
   @@index([scheduledAt])
   @@index([publicId])
   @@map("notifications")
+}
+
+// ---------------------------------------------------------------------------
+// MailJob — Durable, Crash-Safe Mail Queue
+//
+// This table is the single source of truth for the mail delivery queue.
+// Every email to be sent is persisted here BEFORE any delivery attempt.
+// At-most-once delivery is enforced by:
+//   1. idempotencyKey UNIQUE constraint — duplicate enqueue is a no-op
+//   2. Atomic lease claiming via FOR UPDATE SKIP LOCKED
+//   3. Status terminal guard — 'delivered' records are never re-queued
+// ---------------------------------------------------------------------------
+
+model MailJob {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  // Idempotency key — SHA-256(tenantId:type:recipient:subject).
+  // UNIQUE constraint prevents any duplicate email from entering the queue,
+  // even across process restarts, deployments, or concurrent workers.
+  idempotencyKey        String    @unique @map("idempotency_key")
+
+  tenantId              String?   @map("tenant_id") @db.Uuid
+  clinicId              String?   @map("clinic_id") @db.Uuid
+
+  // Correlation to the notifications audit table (optional link)
+  notificationId        String?   @map("notification_id") @db.Uuid
+
+  // Email content (immutable after creation)
+  recipient             String
+  fromAddress           String?   @map("from_address")
+  type                  String    // 'invitation' | 'password_reset' | 'email_verification' | 'notification'
+  subject               String
+  htmlBody              String    @map("html_body") @db.Text
+  textBody              String    @map("text_body") @db.Text
+
+  // State machine: queued → processing → delivered (terminal)
+  //                queued → processing → failed → queued (retry)
+  //                queued → processing → failed (terminal, max retries exceeded)
+  status                String    @default("queued")  // queued | processing | delivered | failed
+  attempts              Int       @default(0)
+  maxAttempts           Int       @default(3) @map("max_attempts")
+
+  // Lease-based atomic claiming — prevents duplicate processing across workers/restarts.
+  // A worker holds the lease for leaseExpiresAt duration. If the process crashes,
+  // the lease expires and another worker can safely reclaim the job.
+  workerId              String?   @map("worker_id")
+  leaseId               String?   @map("lease_id")
+  leaseExpiresAt        DateTime? @map("lease_expires_at")
+
+  // Provider tracking — durable proof of delivery
+  providerName          String?   @map("provider_name")
+  providerMessageId     String?   @map("provider_message_id")
+  providerResponse      Json?     @map("provider_response") @default("{}")
+
+  // Scheduling and retry timing
+  scheduledAt           DateTime? @map("scheduled_at")
+  nextAttemptAt         DateTime? @map("next_attempt_at")
+  lastAttemptAt         DateTime? @map("last_attempt_at")
+
+  // Lifecycle timestamps
+  processingStartedAt   DateTime? @map("processing_started_at")
+  processingCompletedAt DateTime? @map("processing_completed_at")
+  deliveredAt           DateTime? @map("delivered_at")
+  failedAt              DateTime? @map("failed_at")
+
+  // Error tracking
+  failureReason         String?   @map("failure_reason")
+
+  // Distributed tracing
+  correlationId         String?   @map("correlation_id")
+
+  // Arbitrary metadata (non-sensitive)
+  metadata              Json?     @default("{}") @map("metadata")
+
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt      @map("updated_at")
+
+  // Composite index for worker poll query:
+  //   WHERE status = 'queued'
+  //     AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+  //     AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+  //   ORDER BY created_at ASC
+  //   FOR UPDATE SKIP LOCKED
+  @@index([status, scheduledAt, nextAttemptAt, createdAt])
+
+  // Stale lease recovery index:
+  //   WHERE status = 'processing' AND lease_expires_at < NOW()
+  @@index([status, leaseExpiresAt])
+
+  @@index([tenantId, status])
+  @@index([recipient, type, status])
+  @@index([correlationId])
+  @@index([idempotencyKey])
+
+  @@map("mail_jobs")
 }
 
 // ---------------------------------------------------------------------------
@@ -871,4 +1039,216 @@ model PromptAuditLog {
   @@index([eventType])
   @@index([occurredAt])
   @@map("prompt_audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// FAQ
+// ---------------------------------------------------------------------------
+
+model Faq {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId  String   @unique @default(dbgenerated("'faq_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  tenantId  String   @map("tenant_id") @db.Uuid
+  question  String   @db.Text
+  answer    String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt      @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@index([deletedAt])
+  @@map("faqs")
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp Integration — per-clinic WhatsApp Business configuration
+// One phone number maps to exactly one clinic/tenant (enforced by UNIQUE constraint)
+// ---------------------------------------------------------------------------
+
+model WhatsAppIntegration {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publicId         String    @unique @default(dbgenerated("'wa_' || substr(md5(random()::text), 1, 12)")) @map("public_id")
+  tenantId         String    @map("tenant_id") @db.Uuid
+  clinicId         String    @map("clinic_id") @db.Uuid
+
+  // Meta phone number identity
+  phoneNumber      String    @unique @map("phone_number")  // E.164, e.g. +14155552671 — UNIQUE enforces 1 clinic per number
+  phoneNumberId    String    @map("phone_number_id")       // Meta phone number ID
+  wabaId           String    @map("waba_id")               // WhatsApp Business Account ID
+  displayName      String    @map("display_name")
+
+  // Lifecycle
+  status           String    @default("inactive")  // 'active' | 'inactive' | 'suspended'
+  isEnabled        Boolean   @default(false) @map("is_enabled")
+
+  // Webhook verification token (plaintext — used only for Meta GET handshake, not a security secret)
+  webhookVerifyToken String  @map("webhook_verify_token")
+
+  // Bot / AI configuration for this number
+  // Stored as JSON: { greeting, personality, bookingEnabled, rescheduleEnabled, cancelEnabled,
+  //                  allowedAppointmentTypes, bookingHorizonDays, minNoticePeriodHours,
+  //                  handoffKeywords, handoffEnabled, emergencyPhone }
+  settings         Json      @default("{}") @map("settings")
+
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt      @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
+
+  tenant           Tenant    @relation(fields: [tenantId], references: [id])
+  clinic           Clinic    @relation(fields: [clinicId], references: [id])
+  jobs             WhatsAppJob[]
+  messages         WhatsAppMessage[]
+
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([tenantId, clinicId])
+  @@index([phoneNumber])
+  @@index([status])
+  @@index([isEnabled])
+  @@map("whatsapp_integrations")
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp Job — Durable, Crash-Safe Processing Queue
+//
+// Follows the identical pattern as MailJob:
+//   1. idempotencyKey UNIQUE — duplicate enqueue is a no-op
+//   2. Atomic lease claiming via FOR UPDATE SKIP LOCKED
+//   3. Terminal status guard — processed records are never re-queued
+//
+// Job Types:
+//   process_inbound — process a received patient message through AI pipeline
+//   send_outbound   — deliver an AI-generated reply to the patient
+// ---------------------------------------------------------------------------
+
+model WhatsAppJob {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  // Idempotency key — prevents duplicate enqueue across restarts/concurrent workers
+  idempotencyKey   String    @unique @map("idempotency_key")
+
+  tenantId         String    @map("tenant_id") @db.Uuid
+  clinicId         String    @map("clinic_id") @db.Uuid
+  integrationId    String    @map("integration_id") @db.Uuid
+  conversationId   String?   @map("conversation_id") @db.Uuid
+
+  jobType          String    @map("job_type")  // 'process_inbound' | 'send_outbound'
+
+  // State machine: queued → processing → processed (terminal)
+  //                queued → processing → failed_retryable → queued (retry)
+  //                queued → processing → failed_permanent (terminal)
+  status           String    @default("queued") // queued | processing | processed | failed_retryable | failed_permanent
+
+  // Provider-normalized message/event payload
+  payload          Json
+
+  // Meta message ID for deduplication
+  providerMessageId String?  @map("provider_message_id")
+
+  attempts         Int       @default(0)
+  maxAttempts      Int       @default(3) @map("max_attempts")
+
+  // Lease-based atomic claiming
+  workerId         String?   @map("worker_id")
+  leaseId          String?   @map("lease_id")
+  leaseExpiresAt   DateTime? @map("lease_expires_at")
+
+  nextAttemptAt    DateTime? @map("next_attempt_at")
+  lastAttemptAt    DateTime? @map("last_attempt_at")
+  processedAt      DateTime? @map("processed_at")
+  failedAt         DateTime? @map("failed_at")
+  failureReason    String?   @map("failure_reason")
+  correlationId    String?   @map("correlation_id")
+
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt      @map("updated_at")
+
+  tenant           Tenant              @relation(fields: [tenantId], references: [id])
+  clinic           Clinic              @relation(fields: [clinicId], references: [id])
+  integration      WhatsAppIntegration @relation(fields: [integrationId], references: [id])
+
+  // Worker poll index: queued jobs ready to claim
+  @@index([status, nextAttemptAt, createdAt])
+  // Stale lease recovery
+  @@index([status, leaseExpiresAt])
+  @@index([tenantId, status])
+  @@index([providerMessageId])
+  @@index([correlationId])
+  @@map("whatsapp_jobs")
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp Message — Inbound and outbound message log
+// providerMessageId (wamid) is UNIQUE for deduplication
+// ---------------------------------------------------------------------------
+
+model WhatsAppMessage {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String    @map("tenant_id") @db.Uuid
+  clinicId          String    @map("clinic_id") @db.Uuid
+  integrationId     String    @map("integration_id") @db.Uuid
+  conversationId    String?   @map("conversation_id") @db.Uuid
+
+  // Meta wamid — UNIQUE constraint enforces idempotent message storage
+  providerMessageId String    @unique @map("provider_message_id")
+
+  direction         String    // 'inbound' | 'outbound'
+  fromNumber        String    @map("from_number")  // E.164
+  toNumber          String    @map("to_number")    // E.164
+  messageType       String    @map("message_type") // 'text' | 'interactive' | 'template' | 'image' | 'audio' | 'document'
+  content           Json      // normalized content { text?: string, ... }
+
+  // Provider delivery status
+  status            String    @default("received") // received | sent | delivered | read | failed
+  providerStatus    String?   @map("provider_status")  // raw Meta status
+
+  // Processing state
+  processingStatus  String    @default("pending") @map("processing_status") // pending | processed | skipped | error
+
+  metadata          Json      @default("{}") @map("metadata")
+
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt      @map("updated_at")
+
+  tenant            Tenant              @relation(fields: [tenantId], references: [id])
+  clinic            Clinic              @relation(fields: [clinicId], references: [id])
+  integration       WhatsAppIntegration @relation(fields: [integrationId], references: [id])
+
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([integrationId])
+  @@index([conversationId])
+  @@index([direction])
+  @@index([fromNumber])
+  @@index([status])
+  @@index([processingStatus])
+  @@index([createdAt])
+  @@map("whatsapp_messages")
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp Webhook Event — Raw event audit log (immutable)
+// Stored for audit, replay, and debugging. Never used for business logic.
+// ---------------------------------------------------------------------------
+
+model WhatsAppWebhookEvent {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  providerEventId   String?   @map("provider_event_id")  // Meta event ID if available
+  tenantId          String?   @map("tenant_id") @db.Uuid  // resolved after validation; null if unresolvable
+  destinationPhone  String?   @map("destination_phone")  // 'to' phone from payload
+  rawPayload        Json      @map("raw_payload")         // full raw body, stored as-is
+  signatureHeader   String?   @map("signature_header")   // X-Hub-Signature-256 value
+  processingStatus  String    @default("received") @map("processing_status") // received | queued | processed | quarantined | error
+  errorDetails      String?   @map("error_details") @db.Text
+  correlationId     String?   @map("correlation_id")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  @@index([tenantId])
+  @@index([destinationPhone])
+  @@index([processingStatus])
+  @@index([createdAt])
+  @@index([correlationId])
+  @@map("whatsapp_webhook_events")
 }

@@ -76,6 +76,8 @@ export class AppointmentController {
         endTime:   new Date(parsed.data.endTime),
         timezone:  parsed.data.timezone,
         source:    parsed.data.source,
+        appointmentType: parsed.data.appointmentType,
+        durationMinutes: parsed.data.durationMinutes,
         notes:     parsed.data.notes,
         actorId,
         requestId,
@@ -102,14 +104,30 @@ export class AppointmentController {
       }
 
       const { startFrom, startTo, ...rest } = parsed.data;
-      const appointments = await this.appointmentService.listAppointments({
+      const result = await this.appointmentService.listAppointments({
         tenantId,
         ...rest,
         startFrom: startFrom ? new Date(startFrom) : undefined,
         startTo:   startTo   ? new Date(startTo)   : undefined,
       });
 
-      sendSuccess(res, { appointments, total: appointments.length });
+      sendSuccess(res, result);
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  /** GET /api/v1/appointments/counters */
+  public getStatusCounters = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const tenantId = req.tenantId;
+      if (!tenantId) {
+        res.status(400).json({ success: false, error: { code: 'MISSING_TENANT_CONTEXT', message: 'Tenant context is missing.' } });
+        return;
+      }
+      const clinicId = typeof req.query.clinicId === 'string' ? req.query.clinicId : undefined;
+      const counters = await this.appointmentService.getStatusCounters(tenantId, clinicId);
+      sendSuccess(res, counters);
     } catch (err) {
       next(err);
     }
@@ -251,10 +269,11 @@ export class AppointmentController {
       const appointment = await this.appointmentService.rescheduleAppointment({
         id,
         tenantId,
-        startTime: new Date(parsed.data.startTime),
-        endTime:   new Date(parsed.data.endTime),
-        timezone:  parsed.data.timezone,
-        notes:     parsed.data.notes,
+        startTime:       new Date(parsed.data.startTime),
+        endTime:         new Date(parsed.data.endTime),
+        durationMinutes: parsed.data.durationMinutes,
+        timezone:        parsed.data.timezone,
+        notes:           parsed.data.notes,
         actorId,
         requestId,
       });
@@ -309,11 +328,14 @@ export class AppointmentController {
 // ---------------------------------------------------------------------------
 
 export function appointmentErrorHandler(
-  err: Error,
+  err: Error | any,
   req: Request,
   res: Response,
   next: NextFunction,
 ): void {
+  const requestId = (req as any).requestId ?? '';
+  const timestamp = new Date().toISOString();
+
   if (err instanceof AppointmentError) {
     res.status(err.statusCode).json({
       success: false,
@@ -322,10 +344,38 @@ export function appointmentErrorHandler(
         message: err.message,
         details: err.details ? [err.details] : [],
       },
-      requestId: req.requestId ?? '',
-      timestamp: new Date().toISOString(),
+      requestId,
+      timestamp,
     });
     return;
   }
+
+  // Handle Prisma Known Request Errors
+  if (err && typeof err === 'object' && err.code && typeof err.code === 'string' && err.code.startsWith('P')) {
+    console.error('[Prisma Error Details]:', { code: err.code, message: err.message, meta: err.meta });
+    let statusCode = 400;
+    let code = 'DATABASE_ERROR';
+    let message = 'A database error occurred.';
+
+    if (err.code === 'P2025') {
+      statusCode = 404;
+      code = 'APPOINTMENT_NOT_FOUND';
+      message = 'The requested appointment record was not found.';
+    } else if (err.code === 'P2002') {
+      statusCode = 409;
+      code = 'APPOINTMENT_SLOT_TAKEN';
+      message = 'A conflicting appointment record already exists.';
+    }
+
+    res.status(statusCode).json({
+      success: false,
+      error: { code, message },
+      requestId,
+      timestamp,
+    });
+    return;
+  }
+
+  // Pass to Express default error handler for non-domain errors
   next(err);
 }

@@ -18,6 +18,7 @@ import {
   PatientIsolationViolationError,
   PatientArchivedError,
   DuplicatePatientError,
+  DuplicateEmailWarning,
   InvalidPatientStatusTransitionError,
   ClinicTenantMismatchError,
   PatientError,
@@ -48,23 +49,43 @@ export class PatientService implements IPatientService {
   ) {}
 
   public async createPatient(params: CreatePatientParams): Promise<SafePatient> {
-    // 1. Clinic belongs to Tenant validation
-    const clinicValid = await this.repository.clinicBelongsToTenant(params.clinicId, params.tenantId);
-    if (!clinicValid) {
-      throw new ClinicTenantMismatchError();
+    let clinicId = params.clinicId;
+    if (!clinicId) {
+      const mainClinic: any = await this.repository.findMainClinicForTenant(params.tenantId);
+      if (!mainClinic) {
+        throw new PatientError('No active clinic found for tenant.', 'NO_ACTIVE_CLINIC', 400);
+      }
+      clinicId = mainClinic.id;
+    } else {
+      const clinicValid = await this.repository.clinicBelongsToTenant(clinicId, params.tenantId);
+      if (!clinicValid) {
+        throw new ClinicTenantMismatchError();
+      }
     }
 
-    // 2. Duplicate detection: phone must be unique within clinic
-    const existingPhone = await this.repository.findByPhone(params.phone, params.clinicId);
+    // 2. Duplicate detection: phone must be unique per clinic (strict — identifies a person)
+    const existingPhone: any = await this.repository.findByPhone(params.phone, clinicId!);
     if (existingPhone) {
+      if (params.allowExisting) {
+        // allowExisting: AI-created appointments calling back — return the existing record
+        return this.mapToSafePatient(existingPhone);
+      }
       throw new DuplicatePatientError('phone', params.phone);
     }
 
-    // 3. Duplicate detection: email must be unique within clinic (if provided)
+    // 3. Duplicate detection: email — soft warning, can be shared (family members)
     if (params.email) {
-      const existingEmail = await this.repository.findByEmail(params.email, params.clinicId);
+      const existingEmail: any = await this.repository.findByEmail(params.email, clinicId!);
       if (existingEmail) {
-        throw new DuplicatePatientError('email', params.email);
+        // Email collision with a DIFFERENT patient — warn unless caller explicitly allows sharing
+        if (!params.allowEmailSharing) {
+          throw new DuplicateEmailWarning(
+            (existingEmail as any).id,
+            (existingEmail as any).fullName || 'Unknown Patient',
+            params.email,
+          );
+        }
+        // allowEmailSharing: true — fall through and create the new patient with the same email
       }
     }
 
@@ -75,7 +96,7 @@ export class PatientService implements IPatientService {
 
     const created = await this.repository.create({
       tenantId: params.tenantId,
-      clinicId: params.clinicId,
+      clinicId: clinicId!,
       fullName: params.fullName,
       phone: params.phone,
       email: params.email,
@@ -152,7 +173,7 @@ export class PatientService implements IPatientService {
       }
     }
 
-    // Email changed or clinic changed: check uniqueness
+    // Email changed or clinic changed: check for collision with a DIFFERENT patient
     if (
       (params.email !== undefined && params.email !== safeExisting.email) ||
       (params.clinicId !== undefined && params.clinicId !== safeExisting.clinicId)
@@ -161,7 +182,15 @@ export class PatientService implements IPatientService {
       if (emailToCheck) {
         const existingEmail = await this.repository.findByEmail(emailToCheck, targetClinicId);
         if (existingEmail && (existingEmail as any).id !== params.id) {
-          throw new DuplicatePatientError('email', emailToCheck);
+          // Email already used by a different patient — warn unless sharing is explicitly allowed
+          if (!params.allowEmailSharing) {
+            throw new DuplicateEmailWarning(
+              (existingEmail as any).id,
+              (existingEmail as any).fullName || 'Unknown Patient',
+              emailToCheck,
+            );
+          }
+          // allowEmailSharing: true — allow the same email on multiple patients
         }
       }
       if (params.email !== undefined) {

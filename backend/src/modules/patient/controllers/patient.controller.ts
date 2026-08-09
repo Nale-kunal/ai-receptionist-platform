@@ -141,6 +141,7 @@ export class PatientController {
       const phone = req.query['phone'] as string | undefined;
       const email = req.query['email'] as string | undefined;
       const fullName = req.query['fullName'] as string | undefined;
+      const search = (req.query['search'] || req.query['q']) as string | undefined;
       const status = req.query['status'] as PatientStatus | undefined;
       const limit = req.query['limit'] ? parseInt(req.query['limit'] as string, 10) : undefined;
       const offset = req.query['offset'] ? parseInt(req.query['offset'] as string, 10) : undefined;
@@ -151,6 +152,7 @@ export class PatientController {
         phone,
         email,
         fullName,
+        search,
         status,
         limit,
         offset,

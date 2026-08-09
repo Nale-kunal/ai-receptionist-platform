@@ -17,14 +17,17 @@
 export { AuthService } from './services/auth.service';
 export { TokenService } from './services/token.service';
 export { SessionService } from './services/session.service';
+export { InvitationService } from './services/invitation.service';
 export type { AuthEmailProvider } from './services/auth.service';
 export type { TokenServiceConfig } from './services/token.service';
 
 // Controller
 export { AuthController } from './controllers/auth.controller';
+export { InvitationController } from './controllers/invitation.controller';
 
 // Routes
 export { createAuthRouter } from './routes/auth.routes';
+export { createInvitationRoutes } from './routes/invitation.routes';
 export type { AuthRouterOptions, RateLimiterFactory } from './routes/auth.routes';
 
 // Middleware
@@ -100,3 +103,8 @@ export {
 } from './constants/auth.constants';
 export { AUTH_AUDIT_EVENTS } from './constants/audit.constants';
 export type { AuthAuditEvent } from './constants/audit.constants';
+
+// User CRUD Components
+export { UserService, SoleOwnerProtectionError } from './services/user.service';
+export { UserController } from './controllers/user.controller';
+export { createUserRouter } from './routes/user.routes';

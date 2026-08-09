@@ -22,8 +22,8 @@ export interface TwilioProviderConfig {
 
 export function loadTwilioConfig(overrides?: Partial<TwilioProviderConfig>): TwilioProviderConfig {
   return {
-    accountSid: process.env['TWILIO_ACCOUNT_SID'] ?? 'ACmockaccountxxxxxxxxxxxxxxxxxxxx',
-    authToken: process.env['TWILIO_AUTH_TOKEN'] ?? 'mockauthtokenxxxxxxxxxxxxxxxxxxx',
+    accountSid: process.env['TWILIO_ACCOUNT_SID']!,
+    authToken: process.env['TWILIO_AUTH_TOKEN']!,
     apiKey: process.env['TWILIO_API_KEY'],
     apiSecret: process.env['TWILIO_API_SECRET'],
     webhookUrl: process.env['TWILIO_WEBHOOK_URL'] ?? 'https://localhost/webhooks/voice',

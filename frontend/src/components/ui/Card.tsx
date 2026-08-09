@@ -4,11 +4,27 @@ interface CardProps {
   children: React.ReactNode;
   className?: string;
   style?: React.CSSProperties;
-  onClick?: () => void;
+  onClick?: (e?: any) => void;
+  tabIndex?: number;
+  role?: string;
+  'aria-label'?: string;
+  onKeyDown?: (e: any) => void;
 }
 
-export const Card: React.FC<CardProps> = ({ children, className = '', style, onClick }) => {
-  return <div className={`card ${className}`} style={style} onClick={onClick}>{children}</div>;
+export const Card: React.FC<CardProps> = ({ children, className = '', style, onClick, tabIndex, role, 'aria-label': ariaLabel, onKeyDown }) => {
+  return (
+    <div
+      className={`card ${className}`}
+      style={style}
+      onClick={onClick}
+      tabIndex={tabIndex}
+      role={role}
+      aria-label={ariaLabel}
+      onKeyDown={onKeyDown}
+    >
+      {children}
+    </div>
+  );
 };
 
 export const CardHeader: React.FC<CardProps> = ({ children, className = '', style }) => {

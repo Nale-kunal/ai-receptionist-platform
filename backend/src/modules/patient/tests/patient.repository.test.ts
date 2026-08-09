@@ -61,12 +61,14 @@ describe('PatientRepository', () => {
       mockPrismaPatient.create.mockResolvedValue(makeDbPatient(data));
 
       const result = await repository.create(data);
-      expect(mockPrismaPatient.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          tenantId: '550e8400-e29b-41d4-a716-446655440000',
-          phone: '+15555554321',
+      expect(mockPrismaPatient.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            tenantId: '550e8400-e29b-41d4-a716-446655440000',
+            phone: '+15555554321',
+          }),
         }),
-      });
+      );
       expect(result.phone).toBe('+15555554321');
     });
   });

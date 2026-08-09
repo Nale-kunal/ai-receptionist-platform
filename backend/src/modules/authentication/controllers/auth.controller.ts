@@ -101,9 +101,9 @@ function setRefreshTokenCookie(res: Response, token: string, expiresAt: Date): v
   res.cookie(REFRESH_TOKEN_COOKIE_NAME, token, {
     httpOnly: true,
     secure: process.env['NODE_ENV'] === 'production',
-    sameSite: 'strict',
+    sameSite: 'lax',
     expires: expiresAt,
-    path: '/api/v1/auth',
+    path: '/',
   });
 }
 
@@ -111,8 +111,8 @@ function clearRefreshTokenCookie(res: Response): void {
   res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, {
     httpOnly: true,
     secure: process.env['NODE_ENV'] === 'production',
-    sameSite: 'strict',
-    path: '/api/v1/auth',
+    sameSite: 'lax',
+    path: '/',
   });
 }
 
@@ -124,6 +124,8 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly tokenService: TokenService,
+    private readonly permissionEvaluator?: any,
+    private readonly userRepository?: any,
   ) {}
 
   // POST /api/v1/auth/register
@@ -201,6 +203,8 @@ export class AuthController {
         accessTokenExpiresAt: result.accessTokenExpiresAt,
         // refreshToken is NOT included in body — HttpOnly cookie only
         user: result.user,
+        roles: result.roles || [result.user.role],
+        permissions: result.permissions || ['*'],
       });
     } catch (error) {
       next(error);
@@ -276,8 +280,10 @@ export class AuthController {
         deviceInfo,
       });
 
-      // Rotate the cookie with the new refresh token
-      setRefreshTokenCookie(res, result.refreshToken, result.refreshTokenExpiresAt);
+      // Rotate the cookie with the new refresh token (if re-issued)
+      if (result.refreshToken) {
+        setRefreshTokenCookie(res, result.refreshToken, result.refreshTokenExpiresAt);
+      }
 
       sendSuccess(res, {
         accessToken: result.accessToken,
@@ -402,6 +408,215 @@ export class AuthController {
       sendSuccess(res, {
         message: 'If an unverified account with that email exists, a new verification link has been sent.',
       });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // GET /api/v1/auth/me
+  async me(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const requestId = req.requestId ?? '';
+      const userPayload = req.user;
+
+      if (!userPayload || !this.userRepository || !this.permissionEvaluator) {
+        res.status(401).json({
+          success: false,
+          error: { code: 'AUTH_REQUIRED', message: 'Authentication required.', details: [] },
+          requestId,
+        });
+        return;
+      }
+
+      const user = await this.userRepository.findByIdWithRelations(userPayload.userId);
+      if (!user) {
+        res.status(401).json({
+          success: false,
+          error: { code: 'AUTH_REQUIRED', message: 'User session not found.', details: [] },
+          requestId,
+        });
+        return;
+      }
+
+      const resolved = await this.permissionEvaluator.resolvePermissions({
+        userId: user.id,
+        tenantId: user.tenantId,
+        clinicId: user.clinicId,
+        role: user.role,
+      });
+
+      sendSuccess(res, {
+        user: {
+          id: user.id,
+          publicId: user.publicId,
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          role: user.role,
+          status: user.status,
+          createdAt: user.createdAt,
+          updatedAt: user.updatedAt,
+        },
+        roles: resolved.roleNames,
+        permissions: Array.from(resolved.permissions),
+        tenant: user.tenant ? {
+          id: user.tenant.id,
+          publicId: user.tenant.publicId,
+          name: user.tenant.name,
+          slug: user.tenant.slug,
+          subscriptionPlan: user.tenant.subscriptionPlan,
+          status: user.tenant.status,
+        } : null,
+        clinic: user.clinic ? {
+          id: user.clinic.id,
+          publicId: user.clinic.publicId,
+          name: user.clinic.name,
+          slug: user.clinic.slug,
+          status: user.clinic.status,
+        } : null,
+        subscription: user.tenant ? {
+          plan: user.tenant.subscriptionPlan,
+          status: user.tenant.status,
+        } : null,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // GET /api/v1/auth/session
+  // Session probe endpoint: returns 200 OK for both authenticated and unauthenticated visitors
+  // Prevents network 401 console errors on initial load while maintaining Zero Trust security
+  async session(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const requestId = req.requestId ?? '';
+      const authHeader = req.headers.authorization;
+      const cookieToken = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME] as string | undefined;
+
+      if (!authHeader && !cookieToken) {
+        sendSuccess(res, { authenticated: false, user: null });
+        return;
+      }
+
+      if (authHeader && authHeader.startsWith('Bearer ') && this.tokenService && this.userRepository && this.permissionEvaluator) {
+        const rawToken = authHeader.slice(7);
+        try {
+          const payload = this.tokenService.verifyAccessToken(rawToken);
+          const user = await this.userRepository.findByIdWithRelations(payload.sub);
+          if (user && user.tokenVersion === payload.tokenVersion) {
+            const resolved = await this.permissionEvaluator.resolvePermissions({
+              userId: user.id,
+              tenantId: user.tenantId,
+              clinicId: user.clinicId,
+              role: user.role,
+            });
+
+            sendSuccess(res, {
+              authenticated: true,
+              accessToken: rawToken,
+              user: {
+                id: user.id,
+                publicId: user.publicId,
+                email: user.email,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                role: user.role,
+                status: user.status,
+                createdAt: user.createdAt,
+                updatedAt: user.updatedAt,
+              },
+              roles: resolved.roleNames,
+              permissions: Array.from(resolved.permissions),
+              tenant: user.tenant ? {
+                id: user.tenant.id,
+                publicId: user.tenant.publicId,
+                name: user.tenant.name,
+                slug: user.tenant.slug,
+                subscriptionPlan: user.tenant.subscriptionPlan,
+                status: user.tenant.status,
+              } : null,
+              clinic: user.clinic ? {
+                id: user.clinic.id,
+                publicId: user.clinic.publicId,
+                name: user.clinic.name,
+                slug: user.clinic.slug,
+                status: user.clinic.status,
+              } : null,
+            });
+            return;
+          }
+        } catch {
+          // Token verification failed — proceed to cookie check
+        }
+      }
+
+      if (cookieToken && this.authService && this.userRepository && this.permissionEvaluator) {
+        try {
+          const deviceInfo = parseDeviceInfo(req);
+          const refreshResult = await this.authService.refreshTokens({
+            rawRefreshToken: cookieToken,
+            sessionId: req.body?.sessionId || 'auto-restore',
+            requestId,
+            deviceInfo,
+          });
+
+          if (refreshResult.refreshToken) {
+            setRefreshTokenCookie(res, refreshResult.refreshToken, refreshResult.refreshTokenExpiresAt);
+          }
+
+          const payload = this.tokenService.verifyAccessToken(refreshResult.accessToken);
+          const user = await this.userRepository.findByIdWithRelations(payload.sub);
+          if (user) {
+            const resolved = await this.permissionEvaluator.resolvePermissions({
+              userId: user.id,
+              tenantId: user.tenantId,
+              clinicId: user.clinicId,
+              role: user.role,
+            });
+
+            sendSuccess(res, {
+              authenticated: true,
+              accessToken: refreshResult.accessToken,
+              user: {
+                id: user.id,
+                publicId: user.publicId,
+                email: user.email,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                role: user.role,
+                status: user.status,
+                createdAt: user.createdAt,
+                updatedAt: user.updatedAt,
+              },
+              roles: resolved.roleNames,
+              permissions: Array.from(resolved.permissions),
+              tenant: user.tenant ? {
+                id: user.tenant.id,
+                publicId: user.tenant.publicId,
+                name: user.tenant.name,
+                slug: user.tenant.slug,
+                subscriptionPlan: user.tenant.subscriptionPlan,
+                status: user.tenant.status,
+              } : null,
+              clinic: user.clinic ? {
+                id: user.clinic.id,
+                publicId: user.clinic.publicId,
+                name: user.clinic.name,
+                slug: user.clinic.slug,
+                status: user.clinic.status,
+              } : null,
+            });
+            return;
+          }
+        } catch (err) {
+          console.error('[auth.controller] session refresh error:', err);
+          clearRefreshTokenCookie(res);
+          sendSuccess(res, { authenticated: false, user: null });
+          return;
+        }
+      }
+
+      sendSuccess(res, { authenticated: false, user: null });
     } catch (error) {
       next(error);
     }

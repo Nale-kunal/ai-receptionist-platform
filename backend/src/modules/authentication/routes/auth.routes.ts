@@ -165,5 +165,28 @@ export function createAuthRouter(options: AuthRouterOptions): Router {
     (req, res, next) => controller.logout(req, res, next),
   );
 
+  /**
+   * GET /api/v1/auth/me
+   * Requires: Valid Bearer token
+   * Rate: Moderate
+   */
+  router.get(
+    '/me',
+    moderateLimit,
+    authenticate,
+    (req, res, next) => controller.me(req, res, next),
+  );
+
+  /**
+   * GET /api/v1/auth/session
+   * Unauthenticated session probe endpoint for SPA application initialization.
+   * Returns 200 OK for both authenticated and anonymous visitors.
+   */
+  router.get(
+    '/session',
+    moderateLimit,
+    (req, res, next) => controller.session(req, res, next),
+  );
+
   return router;
 }

@@ -60,6 +60,8 @@ import type { EmailVerificationTokenRepository } from '../repositories/email-ver
 import type { TokenService } from './token.service';
 import type { SessionService } from './session.service';
 import type { AuthEventPublisher } from '../events/auth-event.publisher';
+import type { TenantRepository } from '../../tenant/repositories/tenant.repository';
+import type { RbacBootstrapService } from '../../rbac/services/rbac-bootstrap.service';
 
 import type {
   IAuthService,
@@ -88,6 +90,16 @@ import type {
 export interface AuthEmailProvider {
   sendEmailVerification(params: { to: string; token: string; userId: string }): Promise<void>;
   sendPasswordReset(params: { to: string; token: string; userId: string }): Promise<void>;
+  sendInvitationEmail?(params: {
+    to: string;
+    token: string;
+    roleName: string;
+    tenantName: string;
+    inviteLink: string;
+    inviterName: string;
+    tenantId?: string;
+    clinicId?: string;
+  }): Promise<void>;
 }
 
 // --------------------------------------------------------------------------
@@ -104,6 +116,8 @@ export class AuthService implements IAuthService {
     private readonly sessionService: SessionService,
     private readonly eventPublisher: AuthEventPublisher,
     private readonly emailProvider: AuthEmailProvider,
+    private readonly tenantRepository?: TenantRepository,
+    private readonly rbacBootstrapService?: RbacBootstrapService,
   ) {}
 
   // --------------------------------------------------------------------------
@@ -127,9 +141,30 @@ export class AuthService implements IAuthService {
       parallelism: ARGON2_PARALLELISM,
     });
 
-    // Step 3 — Create user record
-    // tenantId may be resolved later by tenant-aware middleware for multi-tenant flows
-    const resolvedTenantId = tenantId ?? 'default'; // Platform resolves this properly in tenant flow
+    // Step 3 — Resolve or create valid UUID for tenantId
+    let resolvedTenantId = tenantId;
+
+    if (!resolvedTenantId || resolvedTenantId === 'default') {
+      if (this.tenantRepository) {
+        const existingTenants = await this.tenantRepository.findMany({ limit: 1 });
+        if (existingTenants.length > 0) {
+          resolvedTenantId = existingTenants[0].id;
+        } else {
+          const newTenant = await this.tenantRepository.create({
+            name: `${firstName}'s Clinic`,
+            slug: `clinic-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            status: 'active',
+            timezone: 'UTC',
+            country: 'US',
+            language: 'en',
+            subscriptionPlan: 'free',
+          });
+          resolvedTenantId = newTenant.id;
+        }
+      } else {
+        resolvedTenantId = '00000000-0000-0000-0000-000000000000';
+      }
+    }
     const user = await this.userRepository.create({
       email,
       passwordHash,
@@ -137,6 +172,23 @@ export class AuthService implements IAuthService {
       lastName,
       tenantId: resolvedTenantId,
     });
+
+    // Automatically assign system role into user_roles table (Mandatory — fails closed on error)
+    if (this.rbacBootstrapService) {
+      try {
+        await this.rbacBootstrapService.assignSystemRoleToUser({
+          userId: user.id,
+          tenantId: resolvedTenantId,
+          roleName: user.role ?? 'clinic_owner',
+          clinicId: user.clinicId,
+        });
+      } catch (err) {
+        console.error('[AuthService] Mandatory user_roles assignment failed during registration. Rolling back user creation:', err);
+        // Rollback user creation to maintain single source of truth transaction integrity
+        await this.userRepository.hardDelete(user.id).catch(() => {});
+        throw new Error(`Registration failed: Could not assign RBAC role permissions.`);
+      }
+    }
 
     // Step 4 — Generate and store email verification token
     const rawVerificationToken = this.tokenService.generateSecureToken();
@@ -304,12 +356,20 @@ export class AuthService implements IAuthService {
       deviceInfo,
     });
 
+    const getRolePermissions = (role: string): string[] => {
+      if (role === 'super_admin' || role === 'clinic_owner') return ['*'];
+      if (role === 'doctor') return ['clinic:read', 'appointment:read', 'appointment:write', 'patient:read', 'patient:write', 'conversation:read', 'settings:read'];
+      return ['clinic:read', 'appointment:read', 'appointment:write', 'patient:read', 'patient:write', 'conversation:read'];
+    };
+
     return {
       accessToken,
       accessTokenExpiresAt,
       refreshToken: rawRefreshToken,
       refreshTokenExpiresAt: tokenExpiresAt,
       user: this.toSafeUser(user),
+      roles: [user.role],
+      permissions: getRolePermissions(user.role),
     };
   }
 
@@ -346,8 +406,16 @@ export class AuthService implements IAuthService {
   async refreshTokens(params: RefreshTokenParams): Promise<TokenRefreshResult> {
     const { rawRefreshToken, sessionId, requestId, deviceInfo } = params;
 
-    // Step 1 — Find the session
-    const session = await this.sessionRepository.findById(sessionId);
+    const presentedHash = this.tokenService.hashRefreshToken(rawRefreshToken);
+
+    // Step 1 — Find the session by sessionId if valid, or by refreshTokenHash for cookie restoration
+    let session: import('@prisma/client').Session | null = null;
+    if (sessionId && sessionId !== 'auto-restore') {
+      session = await this.sessionRepository.findById(sessionId);
+    }
+    if (!session) {
+      session = await this.sessionRepository.findByRefreshTokenHash(presentedHash);
+    }
 
     if (!session) {
       throw new InvalidRefreshTokenError();
@@ -363,15 +431,50 @@ export class AuthService implements IAuthService {
     }
 
     // Step 3 — Verify the presented refresh token matches the stored hash
-    const presentedHash = this.tokenService.hashRefreshToken(rawRefreshToken);
     const storedHash = session.refreshTokenHash;
 
     // Timing-safe comparison to prevent timing attacks
     const hashesMatch = this.timingSafeEqual(presentedHash, storedHash);
 
+    const activeSessionId = session.id;
+
+    // ── REFRESH TOKEN ROTATION CONCURRENCY GRACE PERIOD (RFC 6819) ──
+    const previousHash = (session as any).previousRefreshTokenHash;
+    const rotatedAt = (session as any).rotatedAt;
+    const isPreviousHashMatch = previousHash ? this.timingSafeEqual(presentedHash, previousHash) : false;
+    const isWithinGracePeriod = rotatedAt && (Date.now() - new Date(rotatedAt).getTime() <= 30000); // 30-second window
+
     if (!hashesMatch) {
+      if (isPreviousHashMatch && isWithinGracePeriod) {
+        // Parallel/concurrent refresh request during token rotation window — return current valid access token without revoking
+        const user = await this.userRepository.findById(session.userId);
+        if (!user || user.status !== 'active') {
+          await this.sessionService.revokeSession(activeSessionId);
+          throw new InvalidRefreshTokenError();
+        }
+
+        const accessTokenPayload = {
+          sub: user.id,
+          tenantId: user.tenantId,
+          clinicId: user.clinicId ?? null,
+          role: user.role,
+          tokenVersion: user.tokenVersion,
+          sessionId: activeSessionId,
+          email: user.email,
+        };
+        const accessToken = this.tokenService.signAccessToken(accessTokenPayload);
+        const accessExpiresAt = new Date(Date.now() + this.tokenService.getAccessTokenTtlSeconds() * 1000);
+
+        return {
+          accessToken,
+          accessTokenExpiresAt: accessExpiresAt,
+          refreshToken: '', // keep current active refresh token cookie intact
+          refreshTokenExpiresAt: session.expiresAt,
+        };
+      }
+
       // SECURITY: Token reuse detected — revoke entire session immediately
-      await this.sessionService.revokeSession(sessionId);
+      await this.sessionService.revokeSession(activeSessionId);
 
       await this.eventPublisher.publish({
         eventType: 'auth.token.reuse_detected',
@@ -380,7 +483,7 @@ export class AuthService implements IAuthService {
         tenantId: session.tenantId,
         userId: session.userId,
         ipAddress: deviceInfo.ipAddress,
-        sessionId,
+        sessionId: activeSessionId,
         deviceInfo,
       });
 
@@ -390,7 +493,7 @@ export class AuthService implements IAuthService {
     // Step 4 — Load user to rebuild token payload
     const user = await this.userRepository.findById(session.userId);
     if (!user || user.status !== 'active') {
-      await this.sessionService.revokeSession(sessionId);
+      await this.sessionService.revokeSession(activeSessionId);
       throw new InvalidRefreshTokenError();
     }
 
@@ -405,9 +508,11 @@ export class AuthService implements IAuthService {
       Date.now() + this.tokenService.getRefreshTokenTtlSeconds() * 1000,
     );
 
-    // Step 7 — Update session with new refresh token hash (invalidates old token)
-    await this.sessionRepository.update(sessionId, {
+    // Step 7 — Update session with new refresh token hash and preserve previous hash for grace period
+    await this.sessionRepository.update(activeSessionId, {
       refreshTokenHash: newRefreshTokenHash,
+      previousRefreshTokenHash: storedHash,
+      rotatedAt: new Date(),
       lastActivityAt: new Date(),
       expiresAt: newRefreshExpiresAt,
     });
@@ -419,7 +524,7 @@ export class AuthService implements IAuthService {
       clinicId: user.clinicId ?? null,
       role: user.role,
       tokenVersion: user.tokenVersion,
-      sessionId,
+      sessionId: activeSessionId,
       email: user.email,
     };
     const newAccessToken = this.tokenService.signAccessToken(accessTokenPayload);
@@ -435,7 +540,7 @@ export class AuthService implements IAuthService {
       tenantId: user.tenantId,
       userId: user.id,
       ipAddress: deviceInfo.ipAddress,
-      sessionId,
+      sessionId: activeSessionId,
     });
 
     return {

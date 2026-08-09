@@ -7,7 +7,7 @@
 
 import { Router } from 'express';
 import type { RequestHandler } from 'express';
-import type { AppointmentController } from '../controllers/appointment.controller';
+import { AppointmentController, appointmentErrorHandler } from '../controllers/appointment.controller';
 import {
   PERM_APPOINTMENT_CREATE,
   PERM_APPOINTMENT_READ,
@@ -53,7 +53,15 @@ export function createAppointmentRouter(deps: AppointmentRouterDeps): Router {
     controller.createAppointment,
   );
 
-  // 3. Get appointment by public ID  ← must come before /:id to avoid route shadowing
+  // 3. Get status counters  ← must come before /:id to avoid route shadowing
+  router.get('/counters',
+    authenticate,
+    resolveTenant,
+    requireRead,
+    controller.getStatusCounters,
+  );
+
+  // 4. Get appointment by public ID
   router.get('/public/:publicId',
     authenticate,
     resolveTenant,
@@ -108,7 +116,6 @@ export function createAppointmentRouter(deps: AppointmentRouterDeps): Router {
     requireUpdate,
     controller.completeAppointment,
   );
-
   // 10. Mark no-show
   router.post('/:id/no-show',
     authenticate,
@@ -116,6 +123,9 @@ export function createAppointmentRouter(deps: AppointmentRouterDeps): Router {
     requireUpdate,
     controller.markNoShow,
   );
+
+  // Attach appointment domain error handler to map domain errors to HTTP 409, 422, 404, 400
+  router.use(appointmentErrorHandler);
 
   return router;
 }

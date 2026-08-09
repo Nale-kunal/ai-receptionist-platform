@@ -197,3 +197,78 @@ export class MissingJwtSecretError extends AuthError {
     super(`Required JWT secret "${key}" is not configured.`, 'AUTH_MISSING_JWT_SECRET', 500);
   }
 }
+
+// --------------------------------------------------------------------------
+// Invitation Errors
+// --------------------------------------------------------------------------
+
+export class InvitationAlreadyMemberError extends AuthError {
+  constructor(email: string) {
+    super(
+      `A user with email '${email}' is already a member of this practice.`,
+      'USER_ALREADY_MEMBER',
+      409,
+    );
+  }
+}
+
+export class InvitationAlreadyRegisteredError extends AuthError {
+  constructor(email: string) {
+    super(
+      `A user with email '${email}' is already registered on the platform.`,
+      'USER_ALREADY_REGISTERED',
+      409,
+    );
+  }
+}
+
+export class InvitationPendingExistsError extends AuthError {
+  constructor(email: string) {
+    super(
+      `A pending invitation already exists for '${email}'. Revoke the existing invitation before creating a new one.`,
+      'INVITATION_ALREADY_EXISTS',
+      409,
+    );
+  }
+}
+
+export class InvitationAlreadyAcceptedError extends AuthError {
+  constructor() {
+    super('This invitation token has already been used.', 'INVITATION_ALREADY_ACCEPTED', 409);
+  }
+}
+
+export class InvitationRevokedError extends AuthError {
+  constructor() {
+    super('This invitation has been revoked by the Practice Owner.', 'INVITATION_REVOKED', 410);
+  }
+}
+
+export class InvitationExpiredError extends AuthError {
+  constructor() {
+    super('This invitation link has expired. Please ask your Practice Owner for a new invitation.', 'INVITATION_EXPIRED', 410);
+  }
+}
+
+export class InvitationInvalidTokenError extends AuthError {
+  constructor(message = 'Invalid invitation token.') {
+    super(message, 'INVALID_INVITATION_TOKEN', 400);
+  }
+}
+
+export class InvitationInvalidRoleError extends AuthError {
+  constructor(role: string) {
+    super(
+      `Invalid role '${role}'. Allowed roles are: Practice Owner (clinic_owner), Dentist (doctor), Receptionist (receptionist).`,
+      'INVALID_INVITATION_ROLE',
+      422,
+    );
+  }
+}
+
+export class InvitationActorInactiveError extends AuthError {
+  constructor() {
+    super('Inviting user is not an active member of this practice.', 'INVITATION_ACTOR_INACTIVE', 403);
+  }
+}
+

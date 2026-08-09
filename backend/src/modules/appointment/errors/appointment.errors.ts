@@ -68,9 +68,9 @@ export class AppointmentAlreadyTerminalError extends AppointmentError {
 }
 
 export class DoctorNotAvailableError extends AppointmentError {
-  constructor() {
+  constructor(message?: string) {
     super(
-      'The selected doctor is not active and cannot accept appointments.',
+      message || 'The selected doctor is not active and cannot accept appointments.',
       'DOCTOR_NOT_AVAILABLE',
       422,
     );

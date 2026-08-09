@@ -26,6 +26,8 @@ export interface CreateSessionData {
 
 export interface UpdateSessionData {
   refreshTokenHash?: string;
+  previousRefreshTokenHash?: string;
+  rotatedAt?: Date;
   lastActivityAt?: Date;
   expiresAt?: Date;
   status?: string;
@@ -59,6 +61,19 @@ export class SessionRepository {
   async findById(id: string): Promise<Session | null> {
     return this.prisma.session.findFirst({
       where: { id },
+    });
+  }
+
+  async findByRefreshTokenHash(refreshTokenHash: string): Promise<Session | null> {
+    return this.prisma.session.findFirst({
+      where: {
+        OR: [
+          { refreshTokenHash },
+          { previousRefreshTokenHash: refreshTokenHash },
+        ],
+        status: 'active',
+        expiresAt: { gt: new Date() },
+      },
     });
   }
 

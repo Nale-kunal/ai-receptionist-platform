@@ -31,6 +31,14 @@ export function createCalendarRouter(deps: CalendarRouterDeps): Router {
   const requireRead = authorize.requirePermission(PERM_CALENDAR_READ);
   const requireWrite = authorize.requirePermission(PERM_CALENDAR_WRITE);
 
+  // 0. Get dynamic availability slots
+  router.get('/availability',
+    authenticate,
+    resolveTenant,
+    requireRead,
+    controller.getAvailability,
+  );
+
   // 1. Connect Calendar
   router.post('/',
     authenticate,

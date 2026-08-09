@@ -151,6 +151,9 @@ export function createTenantResolutionMiddleware(
 
       // Setup Request parameters
       req.tenantId = tenant.id;
+      if (req.context) {
+        req.context.tenantId = tenant.id;
+      }
       req.tenantContext = {
         tenantId: tenant.id,
         clinicId: req.user?.clinicId ?? null,
@@ -161,6 +164,7 @@ export function createTenantResolutionMiddleware(
         locale: `${tenant.language}-${tenant.country}`,
       };
 
+      req.profiler?.markTenantComplete();
       next();
     } catch (error) {
       next(error);

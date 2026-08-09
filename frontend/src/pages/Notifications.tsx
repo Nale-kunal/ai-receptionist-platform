@@ -1,20 +1,38 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
+import { api } from '../services/api';
 
 export const Notifications: React.FC = () => {
-  const [reminders, setReminders] = useState({
-    smsEnabled: true,
-    emailEnabled: true,
-    timeBeforeHours: 24,
-    smsTemplate: 'Hi {{patientName}}, this is a reminder for your appointment on {{date}} at {{time}}.',
-  });
+  const [reminders, setReminders] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
 
-  const handleSave = (e: React.FormEvent) => {
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await api.getNotificationRules();
+        setReminders(res);
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    alert('Notification parameters saved successfully!');
+    try {
+      await api.updateNotificationRules(reminders);
+      alert('Notification parameters saved successfully!');
+    } catch (err) {
+      console.error(err);
+    }
   };
+
+  if (loading) return <p>Loading reminder configurations...</p>;
 
   return (
     <div className="flex flex-col gap-6 w-full">

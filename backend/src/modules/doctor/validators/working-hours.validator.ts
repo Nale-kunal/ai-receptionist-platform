@@ -5,14 +5,31 @@
 import { z } from 'zod';
 
 export const DoctorWorkingHourSchema = z
-  .object({
+  .preprocess((val: any) => {
+    if (typeof val === 'object' && val !== null) {
+      const openTime = val.openTime || val.startTime || '09:00';
+      const closeTime = val.closeTime || val.endTime || '17:00';
+      const breakStart = val.breakStart || '12:00';
+      const breakEnd = val.breakEnd || '13:00';
+      return {
+        ...val,
+        openTime,
+        closeTime,
+        breakStart,
+        breakEnd,
+      };
+    }
+    return val;
+  }, z.object({
     dayOfWeek: z.number().int().min(0).max(6),
     openTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'Must be HH:mm format'),
     closeTime: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'Must be HH:mm format'),
+    breakStart: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'Must be HH:mm format').optional().default('12:00'),
+    breakEnd: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'Must be HH:mm format').optional().default('13:00'),
     isClosed: z.boolean(),
-  })
+  }))
   .refine(
-    (data) => {
+    (data: any) => {
       if (data.isClosed) return true;
       const [openH, openM] = data.openTime.split(':').map(Number);
       const [closeH, closeM] = data.closeTime.split(':').map(Number);

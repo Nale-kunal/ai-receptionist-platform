@@ -42,7 +42,7 @@ export const Integrations: React.FC = () => {
               </p>
               <div className="flex gap-4 mt-4" style={{ fontSize: '0.8rem' }}>
                 <span>Account SID: <code style={{ backgroundColor: 'var(--bg-tertiary)', padding: '2px 6px', borderRadius: '4px' }}>AC••••••••••••••••</code></span>
-                <span>Active Numbers: <code>+1 (800) 555-0199</code></span>
+                <span>Active Trunks: <code>Configured via Environment</code></span>
               </div>
             </div>
             <div className="flex flex-col items-end gap-2">

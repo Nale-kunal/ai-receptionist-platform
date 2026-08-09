@@ -194,4 +194,52 @@ describe('PatientService', () => {
       ).rejects.toThrow(InvalidPatientStatusTransitionError);
     });
   });
+
+  describe('multi-tenant isolation', () => {
+    const OTHER_TENANT = 'other-tenant-uuid-12345';
+
+    it('should throw PatientIsolationViolationError when getPatientById is called with a different tenantId', async () => {
+      const existing = makeSafePatient({ tenantId: OTHER_TENANT });
+      mockRepository.findById.mockResolvedValue(existing);
+
+      await expect(
+        service.getPatientById(PATIENT_ID, TENANT_ID)
+      ).rejects.toThrow(PatientIsolationViolationError);
+    });
+
+    it('should throw PatientIsolationViolationError when getPatientByPublicId is called with a different tenantId', async () => {
+      const existing = makeSafePatient({ tenantId: OTHER_TENANT });
+      mockRepository.findByPublicId.mockResolvedValue(existing);
+
+      await expect(
+        service.getPatientByPublicId('pat_abc123', TENANT_ID)
+      ).rejects.toThrow(PatientIsolationViolationError);
+    });
+
+    it('should throw PatientIsolationViolationError when updatePatient is called with a different tenantId', async () => {
+      const existing = makeSafePatient({ tenantId: OTHER_TENANT });
+      mockRepository.findById.mockResolvedValue(existing);
+
+      const params = {
+        id: PATIENT_ID,
+        tenantId: TENANT_ID,
+        fullName: 'Jane Smith Updated',
+        actorId: 'user-admin',
+        requestId: 'req-2',
+      };
+
+      await expect(
+        service.updatePatient(params)
+      ).rejects.toThrow(PatientIsolationViolationError);
+    });
+
+    it('should throw PatientIsolationViolationError when transitionStatus is called with a different tenantId', async () => {
+      const existing = makeSafePatient({ tenantId: OTHER_TENANT });
+      mockRepository.findById.mockResolvedValue(existing);
+
+      await expect(
+        service.transitionStatus(PATIENT_ID, TENANT_ID, 'inactive', 'actor-1', 'req-3')
+      ).rejects.toThrow(PatientIsolationViolationError);
+    });
+  });
 });
