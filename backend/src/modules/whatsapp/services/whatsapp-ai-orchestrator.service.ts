@@ -329,8 +329,8 @@ export class WhatsAppAiOrchestratorService {
         date,
         time: selectedSlot.time,
         selectedSlot: {
-          startTimeIso: `${date}T${selectedSlot.time}:00`,
-          endTimeIso: `${date}T${selectedSlot.endTime}:00`,
+          startTimeIso: this.localSlotToUtcIso(date, selectedSlot.time, timezone),
+          endTimeIso: this.localSlotToUtcIso(date, selectedSlot.endTime, timezone),
         },
         confirmationPending: true,
       }, ctx.correlationId);
@@ -403,6 +403,42 @@ export class WhatsAppAiOrchestratorService {
         }
         console.error('[WhatsApp] Confirm booking error:', msg);
         return 'I wasn\'t able to complete your booking. Please try again or call the clinic.';
+      }
+    }
+
+    // Gap 2 fix: reschedule confirmation was previously missing — always fell through to generic error.
+    if (context.currentOperation === 'reschedule' && context.selectedSlot && context.existingAppointmentId) {
+      try {
+        const timezone = (await this.bookingService.getClinicInfo(ctx)).timezone ?? 'UTC';
+        const booking = await this.bookingService.rescheduleAppointment(
+          ctx,
+          context.existingAppointmentId,
+          context.selectedSlot.startTimeIso,
+          context.selectedSlot.endTimeIso,
+          timezone,
+        );
+
+        await this.conversationService.updateContext(conversationId, ctx.tenantId, {
+          confirmationPending: false,
+          currentOperation: null,
+          existingAppointmentId: undefined,
+          selectedSlot: undefined,
+        }, ctx.correlationId);
+
+        return `✅ Your appointment has been rescheduled!\n\n` +
+               `📅 ${context.date}\n⏰ ${context.time}\n\n` +
+               `Booking reference: *${booking.publicId}*. We'll see you then!`;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('conflict') || msg.includes('overlap')) {
+          await this.conversationService.updateContext(conversationId, ctx.tenantId, {
+            confirmationPending: false,
+            selectedSlot: undefined,
+          }, ctx.correlationId);
+          return 'Unfortunately that slot was just taken. Would you like to see other available times?';
+        }
+        console.error('[WhatsApp] Reschedule confirmation error:', msg);
+        return 'I wasn\'t able to reschedule your appointment. Please call the clinic for assistance.';
       }
     }
 
@@ -484,8 +520,8 @@ export class WhatsAppAiOrchestratorService {
         date,
         time: selectedSlot.time,
         selectedSlot: {
-          startTimeIso: `${date}T${selectedSlot.time}:00`,
-          endTimeIso: `${date}T${selectedSlot.endTime}:00`,
+          startTimeIso: this.localSlotToUtcIso(date, selectedSlot.time, timezone),
+          endTimeIso: this.localSlotToUtcIso(date, selectedSlot.endTime, timezone),
         },
         confirmationPending: true,
       }, ctx.correlationId);
@@ -609,6 +645,56 @@ IMPORTANT:
     if (d.getDay() === 0) d.setDate(d.getDate() + 1);
     if (d.getDay() === 6) d.setDate(d.getDate() + 2);
     return d.toISOString().split('T')[0]!;
+  }
+
+  /**
+   * Gap 6 fix: Convert a local date+time pair in a given IANA timezone to a UTC ISO-8601 string.
+   *
+   * Previously slots were stored as `${date}T${slotTime}:00` with no TZ suffix, causing
+   * AppointmentService.createAppointment to interpret them as UTC even in non-UTC clinics.
+   *
+   * Strategy:
+   *  1. Build a test Date at midnight UTC on the target date.
+   *  2. Use Intl.DateTimeFormat to find what local time that UTC midnight maps to.
+   *  3. Compute the offset (localTime - UTCmidnight) in minutes.
+   *  4. Subtract that offset from the desired local slot time to get UTC.
+   *
+   * Falls back to bare ISO (no offset) if the timezone is unrecognised.
+   */
+  private localSlotToUtcIso(date: string, localTime: string, timezone: string): string {
+    try {
+      // Parse local HH:MM
+      const [hStr, mStr] = localTime.split(':');
+      const localHour = parseInt(hStr ?? '0', 10);
+      const localMinute = parseInt(mStr ?? '0', 10);
+      const localTotalMinutes = localHour * 60 + localMinute;
+
+      // Use Intl to get the wall-clock time at midnight UTC on target date in the clinic TZ
+      const midnightUtc = new Date(`${date}T00:00:00.000Z`);
+      const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      });
+      const parts = formatter.formatToParts(midnightUtc);
+      let tzHour = 0;
+      let tzMinute = 0;
+      for (const part of parts) {
+        if (part.type === 'hour')   tzHour   = parseInt(part.value, 10) % 24;
+        if (part.type === 'minute') tzMinute = parseInt(part.value, 10);
+      }
+      // Offset = local time of UTC midnight in the target TZ (i.e. how far ahead/behind UTC)
+      const offsetMinutes = tzHour * 60 + tzMinute;
+
+      // UTC equivalent of the local slot = localSlot - offset
+      const utcTotalMinutes = localTotalMinutes - offsetMinutes;
+      const utcDate = new Date(midnightUtc.getTime() + utcTotalMinutes * 60 * 1000);
+      return utcDate.toISOString();
+    } catch {
+      // Fallback: return bare local ISO (pre-existing behaviour) — better than throwing
+      return `${date}T${localTime}:00.000Z`;
+    }
   }
 
   private unknownIntentResponse(text: string): WhatsAppAiOutput {

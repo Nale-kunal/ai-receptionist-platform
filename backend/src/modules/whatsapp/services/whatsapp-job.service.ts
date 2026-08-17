@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WhatsApp Job Service — Durable Processing Worker
  *
  * Implements the same crash-safe DB-backed polling pattern as MailQueueService:
@@ -19,6 +19,7 @@ import type { WhatsAppConversationService } from './whatsapp-conversation.servic
 import type { WhatsAppTenantResolverService } from './whatsapp-tenant-resolver.service';
 import type { WhatsAppOutboundService } from './whatsapp-outbound.service';
 import type { WhatsAppIntegrationRepository } from '../repositories/whatsapp-integration.repository';
+import type { WhatsAppBookingService } from './whatsapp-booking.service';
 import type { WhatsAppInboundJobPayload } from '../interfaces/whatsapp.interfaces';
 import {
   WHATSAPP_JOB_PROCESS_INBOUND,
@@ -40,6 +41,7 @@ export class WhatsAppJobService {
     private readonly orchestrator: WhatsAppAiOrchestratorService,
     private readonly conversationService: WhatsAppConversationService,
     private readonly outboundService: WhatsAppOutboundService,
+    private readonly bookingService: WhatsAppBookingService,
   ) {}
 
   /**
@@ -169,14 +171,16 @@ export class WhatsAppJobService {
       return;
     }
 
-    // Get clinic info (timezone etc.)
-    let clinicInfo: Record<string, string> = { name: '', timezone: 'UTC' };
+    // Get clinic info (name, timezone) for the AI prompt — fallback to safe defaults on error.
+    // This is critical for correct slot-time interpretation in non-UTC clinics.
+    let clinicInfo: Record<string, string> = { name: 'the clinic', timezone: 'UTC' };
     try {
-      const { WhatsAppBookingService } = await import('./whatsapp-booking.service');
-      // Clinic info is retrieved via booking service in orchestrator — pass minimal info here
-      clinicInfo = { name: 'the clinic', timezone: 'UTC' };
-    } catch {
-      // Non-fatal
+      clinicInfo = await this.bookingService.getClinicInfo(ctx);
+    } catch (err) {
+      console.warn(
+        `[WhatsApp Worker] Could not fetch clinic info for job ${job.id}, using defaults:`,
+        err instanceof Error ? err.message : String(err),
+      );
     }
 
     // Run AI orchestrator

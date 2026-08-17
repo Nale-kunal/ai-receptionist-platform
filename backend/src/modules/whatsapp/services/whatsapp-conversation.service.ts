@@ -210,10 +210,13 @@ export class WhatsAppConversationService {
     windowStart: Date,
   ): Promise<any | null> {
     // Use existing conversation service list with filter
+    // TODO(long-term): add callerPhone filter to ConversationService.listConversations so this
+    // query is pushed to the DB layer instead of in-memory filtering. The 100-record fetch below
+    // is a mitigation for busy clinics until that DB-side filter is implemented.
     const conversations = await this.conversationService.listConversations({
       tenantId,
       clinicId,
-      limit: 10,
+      limit: 100,
       offset: 0,
     });
 

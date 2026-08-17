@@ -54,17 +54,19 @@ export function tryLoadEnv(): void {
 tryLoadEnv();
 
 // ── Zod Validation Schemas ──────────────────────────────────────────────────
-const weakSecretRegex = /mock|placeholder|default|xxxx|temp|dev-access|dev-refresh|dev-calendar|development-only/i;
+const prodWeakSecretRegex = /mock|placeholder|default|xxxx|temp|development|secret|password|changeme|example|123456|admin/i;
+const devWeakSecretRegex = /mock|placeholder|default|xxxx|temp/i;
 
 const secretSchema = z.string({
   required_error: "Required secret environment variable is missing",
 })
 .min(32, { message: "Secret must be at least 32 characters long" })
 .refine(val => {
-  // Reject weak or placeholder values in all environments
-  return !weakSecretRegex.test(val);
+  const isProd = process.env['NODE_ENV'] === 'production';
+  const regex = isProd ? prodWeakSecretRegex : devWeakSecretRegex;
+  return !regex.test(val);
 }, {
-  message: "Weak, default, or placeholder secrets are not allowed for production security"
+  message: "Weak, default, dev, or placeholder secrets are not allowed for production security"
 });
 
 const backendEnvSchema = z.object({

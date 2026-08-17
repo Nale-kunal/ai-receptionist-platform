@@ -444,6 +444,7 @@ async function bootstrap(): Promise<void> {
     whatsAppAiOrchestrator,
     whatsAppConversationService,
     whatsAppOutboundService,
+    whatsAppBookingService,
   );
 
   const whatsAppWebhookController = new WhatsAppWebhookController(

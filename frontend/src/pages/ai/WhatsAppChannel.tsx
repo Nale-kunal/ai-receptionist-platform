@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   MessageSquare,
   CheckCircle2,
@@ -69,7 +69,14 @@ export const WhatsAppChannel: React.FC = () => {
   const [cancelEnabled, setCancelEnabled] = useState(true);
   const [emergencyPhone, setEmergencyPhone] = useState('');
 
-  const webhookUrl = `${window.location.origin.replace('http:', 'https:')}/api/v1/webhooks/whatsapp`;
+  const webhookUrl = (() => {
+    const apiUrl = import.meta.env.VITE_API_URL;
+    if (apiUrl) {
+      const base = apiUrl.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
+      return `${base}/api/v1/webhooks/whatsapp`;
+    }
+    return `${window.location.origin.replace('http:', 'https:')}/api/v1/webhooks/whatsapp`;
+  })();
 
   useEffect(() => {
     loadIntegrations();
