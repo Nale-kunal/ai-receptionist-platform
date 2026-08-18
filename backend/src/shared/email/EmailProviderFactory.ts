@@ -5,6 +5,8 @@ import { ResendEmailProvider } from './providers/ResendEmailProvider';
 import { SendGridEmailProvider } from './providers/SendGridEmailProvider';
 import { PostmarkEmailProvider } from './providers/PostmarkEmailProvider';
 
+import { DisabledEmailProvider } from './providers/DisabledEmailProvider';
+
 export class EmailProviderConfigurationError extends Error {
   constructor(message: string) {
     super(message);
@@ -32,6 +34,11 @@ export class EmailProviderFactory {
     }
 
     switch (providerName) {
+      case 'disabled':
+      case 'none':
+      case 'off':
+        return new DisabledEmailProvider();
+
       case 'resend':
         return new ResendEmailProvider();
 

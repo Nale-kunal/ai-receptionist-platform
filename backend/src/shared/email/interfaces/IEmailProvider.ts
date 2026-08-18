@@ -28,6 +28,7 @@ export interface EmailSendResult {
   error?: string;
   providerName: string;
   attempts?: number;
+  skipped?: boolean;
 }
 
 export interface IEmailProvider {

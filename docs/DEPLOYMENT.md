@@ -9,7 +9,7 @@ This guide provides step-by-step instructions for deploying the **Dental AI Rece
 - **Backend Web Service**: Hosted on **Render** (Singapore / Region target)
   - Runtime: Node.js 20+ / Express / TypeScript
   - Root Directory: `backend`
-  - Build Command: `npm install && npx prisma generate && npm run build`
+  - Build Command: `npm install --include=dev && npx prisma generate && npm run build`
   - Start Command: `npm run start`
 - **Frontend App**: Hosted on **Vercel**
   - Framework: Vite / React 19 / TypeScript
@@ -36,12 +36,11 @@ Configure the following environment variables in **Render Dashboard → Service 
 | `CALENDAR_ENCRYPTION_SECRET` | **Yes** | Cryptographically random key (32+ chars). Generate with `openssl rand -hex 32` |
 | `OPENAI_API_KEY` | **Yes** | Production OpenAI API key starting with `sk-` |
 | `CORS_ORIGIN` | **Yes** | Public frontend URL, e.g., `https://your-app-name.vercel.app` |
-| `EMAIL_PROVIDER` | **Yes** | `resend` (or `smtp` / `sendgrid` / `postmark`) |
+| `EMAIL_PROVIDER` | **Yes** | `disabled` (for deployments without custom email domain) or `resend` / `smtp` / `sendgrid` / `postmark` |
 | `EMAIL_FROM_NAME` | **Yes** | `"Dental AI Receptionist"` |
-| `EMAIL_FROM_EMAIL` | **Yes** | Verified custom domain email address, e.g., `no-reply@yourdomain.com` *(Note: `onboarding@resend.dev` is prohibited in production)* |
-| `RESEND_API_KEY` | **Yes** | Live Resend API key starting with `re_` |
+| `EMAIL_FROM_EMAIL` | **Yes** | Sender email address (e.g. `no-reply@yourdomain.com`). *(Note: `onboarding@resend.dev` is prohibited when using live providers)* |
+| `RESEND_API_KEY` | Optional** | Live Resend API key starting with `re_` (required when `EMAIL_PROVIDER=resend`) |
 | `APP_NAME` | **Yes** | `"Dental AI Receptionist"` |
-| `APP_URL` | **Yes** | `https://your-app-name.vercel.app` |
 | `FRONTEND_URL` | **Yes** | `https://your-app-name.vercel.app` |
 | `BACKEND_URL` | **Yes** | `https://dental-ai-backend-gy1y.onrender.com` |
 | `WHATSAPP_APP_SECRET` | Optional* | Meta App Secret for X-Hub-Signature-256 HMAC verification |
@@ -49,6 +48,19 @@ Configure the following environment variables in **Render Dashboard → Service 
 | `WHATSAPP_API_VERSION` | **Yes** | `v21.0` |
 
 *\* Required when WhatsApp live integration is enabled.*
+*\*\* Required when live email delivery via Resend is enabled.*
+
+> [!NOTE]
+> **Deploying with `EMAIL_PROVIDER=disabled`**:
+> `EMAIL_PROVIDER=disabled` is an intentional production configuration for deployments where external email delivery or a custom domain has not yet been configured.
+> When `EMAIL_PROVIDER=disabled` is set:
+> - Password reset emails will **not** be externally delivered.
+> - Account verification emails will **not** be externally delivered.
+> - Team member invitation emails will **not** be externally delivered.
+> - Practitioner email notifications will **not** be externally delivered.
+> - **All core AI Voice Receptionist, WhatsApp AI Booking Engine, and Appointment Scheduling features remain 100% operational.**
+> - Before enabling live email delivery (`EMAIL_PROVIDER=resend`), a verified custom domain and live provider API keys must be configured.
+
 
 ### Generating Production Secrets
 

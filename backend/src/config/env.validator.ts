@@ -100,7 +100,7 @@ const backendEnvSchema = z.object({
     message: "Production OpenAI API key must start with 'sk-' and cannot be a mock placeholder"
   }),
   // ── Email Infrastructure Configuration ─────────────────────────────────────
-  EMAIL_PROVIDER: z.enum(['resend', 'smtp', 'sendgrid', 'postmark', 'mock']).default('resend'),
+  EMAIL_PROVIDER: z.enum(['resend', 'smtp', 'sendgrid', 'postmark', 'mock', 'disabled']).default('resend'),
   EMAIL_FROM_NAME: z
     .string()
     .min(1, 'EMAIL_FROM_NAME cannot be empty')
@@ -179,14 +179,16 @@ export function validateEnv(): ValidatedBackendEnv {
       console.error('❌ FATAL: EMAIL_PROVIDER cannot be set to "mock" in production mode!');
       process.exit(1);
     }
-    if (result.data.EMAIL_FROM_EMAIL === 'onboarding@resend.dev' || result.data.EMAIL_FROM_EMAIL.endsWith('@resend.dev')) {
-      console.error('❌ FATAL: Resend onboarding domain (onboarding@resend.dev) is prohibited in production!');
-      console.error('   Please set EMAIL_FROM_EMAIL to a verified custom domain address (e.g. no-reply@yourdomain.com).');
-      process.exit(1);
-    }
-    if (result.data.EMAIL_FROM_EMAIL.includes('localhost')) {
-      console.error('❌ FATAL: EMAIL_FROM_EMAIL cannot be a localhost address in production!');
-      process.exit(1);
+    if (result.data.EMAIL_PROVIDER !== 'disabled') {
+      if (result.data.EMAIL_FROM_EMAIL === 'onboarding@resend.dev' || result.data.EMAIL_FROM_EMAIL.endsWith('@resend.dev')) {
+        console.error('❌ FATAL: Resend onboarding domain (onboarding@resend.dev) is prohibited in production!');
+        console.error('   Please set EMAIL_FROM_EMAIL to a verified custom domain address (e.g. no-reply@yourdomain.com).');
+        process.exit(1);
+      }
+      if (result.data.EMAIL_FROM_EMAIL.includes('localhost')) {
+        console.error('❌ FATAL: EMAIL_FROM_EMAIL cannot be a localhost address in production!');
+        process.exit(1);
+      }
     }
     if (result.data.EMAIL_PROVIDER === 'resend' && !result.data.RESEND_API_KEY) {
       console.error('❌ FATAL: RESEND_API_KEY environment variable is required in production when EMAIL_PROVIDER=resend!');

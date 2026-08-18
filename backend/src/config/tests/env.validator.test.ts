@@ -119,8 +119,65 @@ describe('Environment Validator - Production Security Tests', () => {
     mockConsole.mockRestore();
   });
 
-  it('should fail in production when EMAIL_FROM_EMAIL uses onboarding@resend.dev', () => {
+  it('should pass in production when EMAIL_PROVIDER is set to "disabled"', () => {
     const env = getValidProdEnv();
+    env.EMAIL_PROVIDER = 'disabled';
+    delete (env as any).RESEND_API_KEY;
+    process.env = env as any;
+
+    const config = validateEnv();
+    expect(config.NODE_ENV).toBe('production');
+    expect(config.EMAIL_PROVIDER).toBe('disabled');
+  });
+
+  it('should pass in production when EMAIL_PROVIDER is "disabled" even with onboarding@resend.dev sender', () => {
+    const env = getValidProdEnv();
+    env.EMAIL_PROVIDER = 'disabled';
+    env.EMAIL_FROM_EMAIL = 'onboarding@resend.dev';
+    delete (env as any).RESEND_API_KEY;
+    process.env = env as any;
+
+    const config = validateEnv();
+    expect(config.NODE_ENV).toBe('production');
+    expect(config.EMAIL_PROVIDER).toBe('disabled');
+  });
+
+  it('should fail in production when EMAIL_PROVIDER is "resend" and RESEND_API_KEY is missing', () => {
+    const env = getValidProdEnv();
+    env.EMAIL_PROVIDER = 'resend';
+    delete (env as any).RESEND_API_KEY;
+    process.env = env as any;
+
+    const mockExit = jest.spyOn(process, 'exit').mockImplementation((code?: any) => {
+      throw new Error(`process.exit: ${code}`);
+    });
+    const mockConsole = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(() => validateEnv()).toThrow('process.exit: 1');
+
+    mockExit.mockRestore();
+    mockConsole.mockRestore();
+  });
+
+  it('should fail in production when EMAIL_PROVIDER is invalid or unknown', () => {
+    const env = getValidProdEnv();
+    env.EMAIL_PROVIDER = 'unsupported_provider' as any;
+    process.env = env as any;
+
+    const mockExit = jest.spyOn(process, 'exit').mockImplementation((code?: any) => {
+      throw new Error(`process.exit: ${code}`);
+    });
+    const mockConsole = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(() => validateEnv()).toThrow('process.exit: 1');
+
+    mockExit.mockRestore();
+    mockConsole.mockRestore();
+  });
+
+  it('should fail in production when EMAIL_FROM_EMAIL uses onboarding@resend.dev with a live provider', () => {
+    const env = getValidProdEnv();
+    env.EMAIL_PROVIDER = 'resend';
     env.EMAIL_FROM_EMAIL = 'onboarding@resend.dev';
     process.env = env as any;
 

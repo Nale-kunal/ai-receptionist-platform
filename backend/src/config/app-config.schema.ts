@@ -42,7 +42,7 @@ export const appConfigSchema = z.object({
   }),
 
   email: z.object({
-    provider: z.enum(['resend', 'smtp', 'sendgrid', 'postmark', 'mock']).default('resend'),
+    provider: z.enum(['resend', 'smtp', 'sendgrid', 'postmark', 'mock', 'disabled']).default('resend'),
     fromName: z.string().default('Dental AI'),
     fromEmail: z.string().email(),
     formattedFrom: z.string(),

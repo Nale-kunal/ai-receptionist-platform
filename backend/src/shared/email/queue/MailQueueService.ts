@@ -37,7 +37,7 @@ const WORKER_ID = `worker_${process.pid}_${Date.now()}`;
 // Types
 // ---------------------------------------------------------------------------
 
-export type MailJobStatus = 'queued' | 'processing' | 'delivered' | 'failed';
+export type MailJobStatus = 'queued' | 'processing' | 'delivered' | 'failed' | 'skipped';
 
 export interface MailJobRecord {
   id: string;
@@ -205,9 +205,9 @@ export class MailQueueService {
     if (existing) {
       const status = existing.status as MailJobStatus;
 
-      if (status === 'delivered') {
+      if (status === 'delivered' || status === 'skipped') {
         console.info(
-          `[MailQueueService] IDEMPOTENCY: email already DELIVERED -- skipping enqueue. ` +
+          `[MailQueueService] IDEMPOTENCY: email already ${status.toUpperCase()} -- skipping enqueue. ` +
           `[key=${keyPrefix}...] [jobId=${existing.id}] [recipient=${existing.recipient}] ` +
           `[deliveredAt=${existing.deliveredAt?.toISOString() ?? "unknown"}]`,
         );
@@ -449,6 +449,40 @@ export class MailQueueService {
 
     const durationMs = Date.now() - startTime;
     this.totalLatencyMs += durationMs;
+
+    if (result.skipped) {
+      const completedAt = new Date();
+      await this.prisma.mailJob.update({
+        where: { id: jobId },
+        data: {
+          status:                'skipped',
+          attempts:              newAttempts,
+          providerName:          result.providerName,
+          providerMessageId:     result.messageId ?? null,
+          providerResponse:      { skipped: true, reason: result.error ?? 'Email delivery disabled' } as any,
+          lastAttemptAt:         completedAt,
+          processingCompletedAt: completedAt,
+          workerId:              null,
+          leaseId:               null,
+          leaseExpiresAt:        null,
+          failureReason:         result.error ?? 'Email delivery disabled; job skipped.',
+        },
+      }).catch(() => {});
+
+      const ntfId = rawJob.notification_id ?? rawJob.notificationId;
+      if (ntfId) {
+        await this.prisma.notification.update({
+          where: { id: ntfId },
+          data: { status: 'skipped', provider: result.providerName },
+        }).catch(() => {});
+      }
+
+      console.info(
+        `[MailQueueService] Job ${jobId} SKIPPED (Email delivery disabled) ` +
+        `[provider=${result.providerName}] [durationMs=${durationMs}]`,
+      );
+      return;
+    }
 
     if (result.success) {
       const deliveredAt = new Date();
