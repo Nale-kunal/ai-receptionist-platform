@@ -2,26 +2,19 @@ import React, { useState, useEffect } from 'react';
 import {
   MessageSquare,
   CheckCircle2,
-  XCircle,
   Settings,
   Phone,
   Bot,
   AlertTriangle,
-  Send,
   RefreshCw,
-  Copy,
   Check,
   Shield,
-  HelpCircle,
 } from 'lucide-react';
-import { api } from '../../services/api';
 
 interface WhatsAppIntegration {
   id: string;
   publicId: string;
   phoneNumber: string;
-  phoneNumberId: string;
-  wabaId: string;
   displayName: string;
   status: 'active' | 'inactive' | 'suspended';
   isEnabled: boolean;
@@ -46,37 +39,12 @@ export const WhatsAppChannel: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [copiedWebhook, setCopiedWebhook] = useState(false);
 
-  // Modal / Form state
-  const [isEditing, setIsEditing] = useState(false);
-  const [selectedIntegration, setSelectedIntegration] = useState<WhatsAppIntegration | null>(null);
+  // Form state
   const [saving, setSaving] = useState(false);
-
-  // New Integration Form
   const [isCreating, setIsCreating] = useState(false);
   const [newPhone, setNewPhone] = useState('');
-  const [newPhoneId, setNewPhoneId] = useState('');
-  const [newWabaId, setNewWabaId] = useState('');
   const [newDisplayName, setNewDisplayName] = useState('');
-  const [newVerifyToken, setNewVerifyToken] = useState('wa_verify_' + Math.random().toString(36).slice(2, 10));
-
-  // Settings form
-  const [greeting, setGreeting] = useState('');
-  const [personality, setPersonality] = useState('');
-  const [bookingEnabled, setBookingEnabled] = useState(true);
-  const [rescheduleEnabled, setRescheduleEnabled] = useState(true);
-  const [cancelEnabled, setCancelEnabled] = useState(true);
-  const [emergencyPhone, setEmergencyPhone] = useState('');
-
-  const webhookUrl = (() => {
-    const apiUrl = import.meta.env.VITE_API_URL;
-    if (apiUrl) {
-      const base = apiUrl.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
-      return `${base}/api/v1/webhooks/whatsapp`;
-    }
-    return `${window.location.origin.replace('http:', 'https:')}/api/v1/webhooks/whatsapp`;
-  })();
 
   useEffect(() => {
     loadIntegrations();
@@ -86,7 +54,6 @@ export const WhatsAppChannel: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      // Use standard api client if route exists, or direct fetch
       const res = await fetch('/api/v1/whatsapp/clinics/me/integrations', {
         headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` },
       });
@@ -94,20 +61,13 @@ export const WhatsAppChannel: React.FC = () => {
         const data = await res.json();
         setIntegrations(data.integrations || []);
       } else {
-        // Fallback demo integration list if backend not yet wired to current clinic ID
         setIntegrations([]);
       }
-    } catch (err: any) {
+    } catch {
       setError('Unable to load WhatsApp integrations.');
     } finally {
       setLoading(false);
     }
-  }
-
-  function handleCopyWebhook() {
-    navigator.clipboard.writeText(webhookUrl);
-    setCopiedWebhook(true);
-    setTimeout(() => setCopiedWebhook(false), 2000);
   }
 
   async function handleCreateIntegration(e: React.FormEvent) {
@@ -123,18 +83,13 @@ export const WhatsAppChannel: React.FC = () => {
         },
         body: JSON.stringify({
           phoneNumber: newPhone,
-          phoneNumberId: newPhoneId,
-          wabaId: newWabaId,
           displayName: newDisplayName,
-          webhookVerifyToken: newVerifyToken,
         }),
       });
       if (res.ok) {
-        setSuccess('WhatsApp Business number connected successfully!');
+        setSuccess('WhatsApp Business number registered successfully! Platform admin will complete Meta setup.');
         setIsCreating(false);
         setNewPhone('');
-        setNewPhoneId('');
-        setNewWabaId('');
         setNewDisplayName('');
         loadIntegrations();
       } else {
@@ -202,7 +157,7 @@ export const WhatsAppChannel: React.FC = () => {
               WhatsApp AI Appointment Booking
             </h2>
             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '4px 0 0' }}>
-              Connect your Meta WhatsApp Business number so patients can book, reschedule, and check appointments 24/7.
+              Connect your WhatsApp Business number so patients can book, reschedule, and check appointments 24/7.
             </p>
           </div>
         </div>
@@ -212,7 +167,7 @@ export const WhatsAppChannel: React.FC = () => {
           onClick={() => setIsCreating(true)}
           style={{ backgroundColor: '#128C7E', borderColor: '#128C7E', padding: '10px 18px', fontWeight: 600 }}
         >
-          + Connect Phone Number
+          + Register Phone Number
         </button>
       </div>
 
@@ -229,53 +184,6 @@ export const WhatsAppChannel: React.FC = () => {
           <span>{success}</span>
         </div>
       )}
-
-      {/* Webhook Endpoint Info Box */}
-      <div
-        className="card"
-        style={{
-          padding: '16px 20px',
-          marginBottom: '24px',
-          backgroundColor: 'var(--bg-secondary)',
-          border: '1px solid var(--border-color)',
-          borderRadius: 'var(--radius)',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-          <Shield size={16} style={{ color: 'var(--primary)' }} />
-          <span style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)' }}>
-            Meta Meta Webhook Callback URL
-          </span>
-        </div>
-        <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '10px' }}>
-          Provide this Webhook URL and Verification Token in your Meta App Dashboard under WhatsApp &gt; Configuration:
-        </p>
-
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <code
-            style={{
-              flex: 1,
-              padding: '8px 12px',
-              backgroundColor: 'var(--bg-primary)',
-              border: '1px solid var(--border-color)',
-              borderRadius: '6px',
-              fontSize: '0.82rem',
-              color: 'var(--text-primary)',
-              fontFamily: 'monospace',
-            }}
-          >
-            {webhookUrl}
-          </code>
-          <button
-            onClick={handleCopyWebhook}
-            className="btn btn-secondary"
-            style={{ padding: '8px 14px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '6px' }}
-          >
-            {copiedWebhook ? <Check size={14} style={{ color: 'var(--success)' }} /> : <Copy size={14} />}
-            <span>{copiedWebhook ? 'Copied' : 'Copy'}</span>
-          </button>
-        </div>
-      </div>
 
       {/* Connected Numbers List */}
       <div style={{ marginBottom: '24px' }}>
@@ -300,12 +208,12 @@ export const WhatsAppChannel: React.FC = () => {
             }}
           >
             <Bot size={36} style={{ color: 'var(--text-muted)', marginBottom: '12px' }} />
-            <h4 style={{ fontSize: '0.95rem', fontWeight: 600, margin: '0 0 6px' }}>No WhatsApp numbers connected</h4>
+            <h4 style={{ fontSize: '0.95rem', fontWeight: 600, margin: '0 0 6px' }}>No WhatsApp numbers registered</h4>
             <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', maxWidth: '400px', margin: '0 auto 16px' }}>
-              Connect a WhatsApp Business Account (WABA) phone number to activate automated AI booking for your patients.
+              Register your clinic's WhatsApp phone number to activate automated AI booking for your patients.
             </p>
             <button className="btn btn-primary" onClick={() => setIsCreating(true)}>
-              Connect WABA Number
+              Register Number
             </button>
           </div>
         ) : (
@@ -354,7 +262,7 @@ export const WhatsAppChannel: React.FC = () => {
                       </span>
                     </div>
                     <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '2px 0 0' }}>
-                      Phone: <strong>{item.phoneNumber}</strong> (ID: {item.phoneNumberId})
+                      Phone: <strong>{item.phoneNumber}</strong>
                     </p>
                   </div>
                 </div>
@@ -374,7 +282,7 @@ export const WhatsAppChannel: React.FC = () => {
         )}
       </div>
 
-      {/* Modal / Overlay for connecting new number */}
+      {/* Register Number Modal */}
       {isCreating && (
         <div
           style={{
@@ -399,7 +307,7 @@ export const WhatsAppChannel: React.FC = () => {
             }}
           >
             <h3 style={{ fontSize: '1.1rem', fontWeight: 700, margin: '0 0 16px', color: 'var(--text-primary)' }}>
-              Connect WhatsApp Business Account
+              Register WhatsApp Business Phone Number
             </h3>
 
             <form onSubmit={handleCreateIntegration} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
@@ -436,53 +344,6 @@ export const WhatsAppChannel: React.FC = () => {
                 </span>
               </div>
 
-              <div>
-                <label style={{ fontSize: '0.8rem', fontWeight: 600, display: 'block', marginBottom: '4px' }}>
-                  Meta Phone Number ID
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. 100609346382103"
-                  value={newPhoneId}
-                  onChange={(e) => setNewPhoneId(e.target.value)}
-                  className="input"
-                  style={{ width: '100%' }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: '0.8rem', fontWeight: 600, display: 'block', marginBottom: '4px' }}>
-                  WhatsApp Business Account (WABA) ID
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. 108492048501923"
-                  value={newWabaId}
-                  onChange={(e) => setNewWabaId(e.target.value)}
-                  className="input"
-                  style={{ width: '100%' }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: '0.8rem', fontWeight: 600, display: 'block', marginBottom: '4px' }}>
-                  Webhook Verify Token (Secret)
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={newVerifyToken}
-                  onChange={(e) => setNewVerifyToken(e.target.value)}
-                  className="input"
-                  style={{ width: '100%', fontFamily: 'monospace' }}
-                />
-                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                  Enter this token in Meta App Dashboard when setting up Webhook.
-                </span>
-              </div>
-
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '12px' }}>
                 <button
                   type="button"
@@ -498,7 +359,7 @@ export const WhatsAppChannel: React.FC = () => {
                   disabled={saving}
                   style={{ backgroundColor: '#128C7E', borderColor: '#128C7E' }}
                 >
-                  {saving ? 'Connecting...' : 'Connect Number'}
+                  {saving ? 'Registering...' : 'Register Number'}
                 </button>
               </div>
             </form>
@@ -508,3 +369,4 @@ export const WhatsAppChannel: React.FC = () => {
     </div>
   );
 };
+

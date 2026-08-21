@@ -1,26 +1,44 @@
 # Dependency directories
 node_modules/
+**/node_modules/
 jspm_packages/
 web_modules/
 
 # Build outputs
 dist/
+**/dist/
 build/
+**/build/
 out/
 .next/
 .nuxt/
 tsconfig.tsbuildinfo
 
-# Environment files
+# Environment & Secret files
 .env
+.env.*
+*.env
+*.env.*
+**/.env
+**/.env.*
+**/*.env
+**/*.env.*
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
-*.env
-*.env.*
 .env.test
 .env.production
+
+# Admin & Backend Environment files explicitly
+admin-backend/.env
+admin-backend/.env.*
+admin-frontend/.env
+admin-frontend/.env.*
+backend/.env
+backend/.env.*
+frontend/.env
+frontend/.env.*
 
 # Logs
 logs
@@ -58,6 +76,9 @@ Thumbs.db
 *.db-journal
 *.sqlite
 secrets/
+**/secrets/
 cookies.txt
 *.txt
 credentials.json
+*.pem
+*.key

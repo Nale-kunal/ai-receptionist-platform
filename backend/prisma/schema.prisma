@@ -505,6 +505,7 @@ model Doctor {
   @@index([status])
   @@index([displayName])
   @@index([specialization])
+  @@index([tenantId, deletedAt])
   @@map("doctors")
 }
 
@@ -553,6 +554,7 @@ model Patient {
   @@index([phone])
   @@index([mrn])
   @@index([email])
+  @@index([tenantId, deletedAt])
   @@map("patients")
 }
 
@@ -697,6 +699,7 @@ model Conversation {
   @@index([intent])
   @@index([publicId])
   @@index([tenantId, startedAt(sort: Desc)])
+  @@index([tenantId, status, startedAt])
   @@index([clinicId, createdAt])
   @@map("conversations")
 }
@@ -1251,4 +1254,111 @@ model WhatsAppWebhookEvent {
   @@index([createdAt])
   @@index([correlationId])
   @@map("whatsapp_webhook_events")
+}
+
+// ---------------------------------------------------------------------------
+// SuperAdmin — Platform-level administrator (separate from clinic Users)
+//
+// Security boundary: SuperAdmin accounts are completely independent of the
+// clinic tenant/user system. A clinic user CANNOT escalate to SuperAdmin.
+// Authentication uses separate JWT secrets (ADMIN_JWT_ACCESS_SECRET /
+// ADMIN_JWT_REFRESH_SECRET) that are never shared with clinic auth.
+// ---------------------------------------------------------------------------
+
+model SuperAdmin {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email               String    @unique
+  passwordHash        String    @map("password_hash")
+  displayName         String    @map("display_name")
+  isActive            Boolean   @default(true)  @map("is_active")
+
+  // Security: force password change on first login
+  mustChangePassword  Boolean   @default(true)  @map("must_change_password")
+
+  // Brute-force protection
+  failedLoginAttempts Int       @default(0)      @map("failed_login_attempts")
+  lockedUntil         DateTime? @map("locked_until")
+
+  // Audit timestamps
+  lastLoginAt         DateTime? @map("last_login_at")
+  passwordChangedAt   DateTime? @map("password_changed_at")
+
+  // Token version — increment to revoke all active sessions
+  tokenVersion        Int       @default(0)      @map("token_version")
+
+  createdAt           DateTime  @default(now())  @map("created_at")
+  updatedAt           DateTime  @updatedAt       @map("updated_at")
+
+  sessions  AdminSession[]
+  auditLogs AdminAuditLog[]
+
+  @@index([email])
+  @@index([isActive])
+  @@map("super_admins")
+}
+
+// ---------------------------------------------------------------------------
+// AdminSession — Refresh-token sessions for SuperAdmin (same rotation model
+// as clinic Session but backed by separate table + separate JWT secrets)
+// ---------------------------------------------------------------------------
+
+model AdminSession {
+  id                       String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  adminId                  String    @map("admin_id") @db.Uuid
+
+  refreshTokenHash         String    @map("refresh_token_hash")
+  previousRefreshTokenHash String?   @map("previous_refresh_token_hash")
+  rotatedAt                DateTime? @map("rotated_at")
+
+  userAgent               String    @map("user_agent")
+  ipAddress               String    @map("ip_address")
+
+  status                  String    @default("active") // active | revoked | expired
+  expiresAt               DateTime  @map("expires_at")
+  lastActivityAt          DateTime  @default(now()) @map("last_activity_at")
+
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt      @map("updated_at")
+
+  admin SuperAdmin @relation(fields: [adminId], references: [id])
+
+  @@index([adminId, status])
+  @@index([status])
+  @@map("admin_sessions")
+}
+
+// ---------------------------------------------------------------------------
+// AdminAuditLog — Immutable record of every sensitive admin action
+//
+// Never deleted. Every mutation through the admin API should emit a record.
+// ---------------------------------------------------------------------------
+
+model AdminAuditLog {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  adminId     String?  @map("admin_id")   @db.Uuid   // null for system bootstrap
+  tenantId    String?  @map("tenant_id")  @db.Uuid   // affected tenant (if applicable)
+  clinicId    String?  @map("clinic_id")  @db.Uuid   // affected clinic (if applicable)
+
+  action      String                                  // e.g. "clinic.create", "whatsapp.provision"
+  entityType  String?  @map("entity_type")            // e.g. "Clinic", "WhatsAppIntegration"
+  entityId    String?  @map("entity_id")              // UUID of affected entity
+  outcome     String   @default("success")            // "success" | "failure"
+
+  // Safe metadata — NEVER include passwords, tokens, or secrets
+  metadata    Json?    @default("{}")
+
+  ipAddress   String?  @map("ip_address")
+  requestId   String?  @map("request_id")
+
+  occurredAt  DateTime @default(now()) @map("occurred_at")
+
+  admin       SuperAdmin? @relation(fields: [adminId], references: [id])
+
+  @@index([adminId])
+  @@index([tenantId])
+  @@index([clinicId])
+  @@index([action])
+  @@index([entityType, entityId])
+  @@index([occurredAt])
+  @@map("admin_audit_logs")
 }

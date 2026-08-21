@@ -58,7 +58,7 @@ interface CachedAuthValidation {
 }
 
 const authValidationCache = new Map<string, CachedAuthValidation>();
-const AUTH_CACHE_TTL_MS = 2000;
+const AUTH_CACHE_TTL_MS = 15000;
 
 export function invalidateAuthCache(userId?: string): void {
   if (userId) {

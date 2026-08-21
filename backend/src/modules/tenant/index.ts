@@ -81,7 +81,7 @@ export { TenantService } from './services/tenant.service';
 export { TenantController, tenantErrorHandler } from './controllers/tenant.controller';
 
 // Middleware
-export { createTenantResolutionMiddleware } from './middleware/tenant-resolution.middleware';
+export { createTenantResolutionMiddleware, invalidateTenantResolutionCache } from './middleware/tenant-resolution.middleware';
 export type { TenantResolverOptions } from './middleware/tenant-resolution.middleware';
 
 // Routes

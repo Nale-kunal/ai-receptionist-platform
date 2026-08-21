@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WhatsApp Admin Controller
  *
  * REST API for managing WhatsApp integrations per clinic.
@@ -13,10 +13,10 @@ const E164 = z.string().regex(/^\+[1-9]\d{7,14}$/, 'Phone must be E.164 format')
 
 const CreateIntegrationSchema = z.object({
   phoneNumber: E164,
-  phoneNumberId: z.string().min(1),
-  wabaId: z.string().min(1),
+  phoneNumberId: z.string().default('PENDING_PROVISIONING'),
+  wabaId: z.string().default('PENDING_PROVISIONING'),
   displayName: z.string().min(1).max(120),
-  webhookVerifyToken: z.string().min(8),
+  webhookVerifyToken: z.string().default(() => `wa_verify_${Math.random().toString(36).slice(2, 12)}`),
   settings: z.record(z.unknown()).optional(),
 });
 
@@ -109,6 +109,18 @@ export class WhatsAppAdminController {
     try {
       const tenantId = (req as any).user?.tenantId;
       const { id } = req.params;
+      if (!tenantId || !id) { res.status(400).json({ error: 'Missing params' }); return; }
+
+      const existing = await this.integrationRepo.findById(id, tenantId);
+      if (!existing) { res.status(404).json({ error: 'Integration not found' }); return; }
+
+      if (existing.phoneNumberId === 'PENDING_PROVISIONING' || existing.wabaId === 'PENDING_PROVISIONING') {
+        res.status(422).json({
+          error: 'WhatsApp channel setup is pending platform configuration. Please try again after setup is complete.',
+        });
+        return;
+      }
+
       const integration = await this.integrationRepo.activate(id, tenantId);
       res.json({ integration });
     } catch (err) { next(err); }

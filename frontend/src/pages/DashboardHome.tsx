@@ -36,7 +36,7 @@ import { useDashboardStateMachine } from '../hooks/useDashboardStateMachine';
 
 export const DashboardHome: React.FC = () => {
   const navigate = useNavigate();
-  const { user, clinic } = useAuth();
+  const { user, clinic, tenant } = useAuth();
   const { state: dashboardState, isOnline } = useDashboardStateMachine();
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -641,7 +641,7 @@ export const DashboardHome: React.FC = () => {
             Good {new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}, {greetingName} 👋
           </h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', margin: 0 }}>
-            Here&apos;s what&apos;s happening at {clinic?.name || 'your practice'} today.
+            Here&apos;s what&apos;s happening at {clinic?.name || tenant?.name || 'your practice'} today.
           </p>
         </div>
 

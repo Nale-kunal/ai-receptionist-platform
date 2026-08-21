@@ -178,7 +178,7 @@ export class UserRepository {
   }
 
   async findByIdWithRelations(id: string): Promise<any | null> {
-    return this.prisma.user.findFirst({
+    const user = await this.prisma.user.findFirst({
       where: {
         id,
         deletedAt: null,
@@ -188,6 +188,18 @@ export class UserRepository {
         clinic: true,
       },
     });
+
+    if (user && !user.clinic && user.tenantId) {
+      const primaryClinic = await this.prisma.clinic.findFirst({
+        where: { tenantId: user.tenantId },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (primaryClinic) {
+        (user as any).clinic = primaryClinic;
+      }
+    }
+
+    return user;
   }
 
   async findMany(params: {

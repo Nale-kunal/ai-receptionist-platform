@@ -95,6 +95,21 @@ export interface LoginResult {
   user: SafeUser;
   roles?: string[];
   permissions?: string[];
+  tenant?: {
+    id: string;
+    publicId?: string;
+    name: string;
+    slug?: string;
+    subscriptionPlan?: string;
+    status: string;
+  } | null;
+  clinic?: {
+    id: string;
+    publicId?: string;
+    name: string;
+    slug?: string;
+    status: string;
+  } | null;
 }
 
 // --------------------------------------------------------------------------

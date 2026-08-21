@@ -10,7 +10,7 @@ interface CachedSummary {
 
 export class DashboardController {
   private static cache = new Map<string, CachedSummary>();
-  private static readonly TTL_MS = 5000; // 5-second short TTL cache
+  private static readonly TTL_MS = 10000; // 10-second short TTL cache
 
   constructor(private readonly prisma: PrismaClient) {}
 
@@ -86,7 +86,7 @@ export class DashboardController {
             },
           },
           orderBy: { startTime: 'asc' },
-          take: 200,
+          take: 50,
         }),
 
         this.prisma.doctor.findMany({
@@ -98,7 +98,7 @@ export class DashboardController {
             workingHours: true,
             status: true,
           },
-          take: 50,
+          take: 30,
         }),
 
         this.prisma.patient.findMany({
@@ -110,7 +110,7 @@ export class DashboardController {
             email: true,
             dateOfBirth: true,
           },
-          take: 100,
+          take: 50,
         }),
 
         this.prisma.conversation.findMany({

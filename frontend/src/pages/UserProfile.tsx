@@ -85,7 +85,7 @@ export const UserProfile: React.FC = () => {
                 <div>
                   <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)' }}>Clinic Assignment</label>
                   <span style={{ fontSize: '0.9rem', fontWeight: 500 }}>
-                    {clinic?.name || 'Default Clinic Group'} ({clinic?.slug || 'default'})
+                    {clinic?.name || tenant?.name || 'Primary Clinic'} ({clinic?.slug || tenant?.slug || 'default'})
                   </span>
                 </div>
               </div>
@@ -95,7 +95,7 @@ export const UserProfile: React.FC = () => {
                 <div>
                   <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)' }}>Organization Tenant</label>
                   <span style={{ fontSize: '0.9rem', fontWeight: 500 }}>
-                    {tenant?.name || 'Default Tenant Organization'} ({tenant?.slug || 'default'})
+                    {tenant?.name || clinic?.name || 'Primary Organization'} ({tenant?.slug || clinic?.slug || 'default'})
                   </span>
                 </div>
               </div>

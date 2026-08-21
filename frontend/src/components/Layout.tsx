@@ -96,7 +96,7 @@ function getRoleDisplayName(role?: string): string {
 }
 
 export const Layout: React.FC<LayoutProps> = ({ children }) => {
-  const { user, clinic, logout, hasPermission } = useAuth();
+  const { user, clinic, tenant, logout, hasPermission } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
@@ -186,7 +186,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
     return true;
   });
 
-  const clinicName = clinic?.name || 'My Practice';
+  const clinicName = clinic?.name || tenant?.name || 'Clinic';
   const pageTitle = getPageTitle(location.pathname);
 
   return (

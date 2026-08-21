@@ -139,6 +139,21 @@ export const Appointments: React.FC = () => {
 
   useEffect(() => {
     loadData();
+
+    const handleRevalidate = () => {
+      if (document.visibilityState === 'visible') {
+        appointmentCoordinator.invalidateCache();
+        loadData();
+      }
+    };
+
+    window.addEventListener('focus', handleRevalidate);
+    document.addEventListener('visibilitychange', handleRevalidate);
+
+    return () => {
+      window.removeEventListener('focus', handleRevalidate);
+      document.removeEventListener('visibilitychange', handleRevalidate);
+    };
   }, [loadData]);
 
   // Dynamic Doctor Availability Slots Fetcher

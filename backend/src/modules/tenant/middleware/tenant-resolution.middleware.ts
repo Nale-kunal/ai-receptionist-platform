@@ -21,6 +21,29 @@ export interface TenantResolverOptions {
   /** Injected mapping function for Twilio phone numbers or API keys */
   telephonyMapper?: (phoneNumber: string) => Promise<string | null>;
   apiKeyMapper?: (apiKey: string) => Promise<string | null>;
+  clinicChecker?: (clinicId: string) => Promise<{ status: string } | null>;
+}
+
+// In-memory tenant resolution cache (15-second TTL)
+interface CachedTenantResolution {
+  tenant: SafeTenant;
+  clinicStatus?: string;
+  expiresAt: number;
+}
+
+const tenantResolutionCache = new Map<string, CachedTenantResolution>();
+const TENANT_RESOLUTION_TTL_MS = 15000;
+
+export function invalidateTenantResolutionCache(tenantIdOrSlug?: string): void {
+  if (tenantIdOrSlug) {
+    for (const [key, val] of tenantResolutionCache.entries()) {
+      if (key === tenantIdOrSlug || val.tenant.id === tenantIdOrSlug || val.tenant.slug === tenantIdOrSlug) {
+        tenantResolutionCache.delete(key);
+      }
+    }
+  } else {
+    tenantResolutionCache.clear();
+  }
 }
 
 export function createTenantResolutionMiddleware(
@@ -96,21 +119,69 @@ export function createTenantResolutionMiddleware(
         return;
       }
 
-      // Fetch tenant from db
+      // Check fast in-memory resolution cache
+      const now = Date.now();
+      const cached = tenantResolutionCache.get(resolvedIdOrSlug);
       let tenant: SafeTenant | null = null;
-      try {
-        if (UUID_REGEX.test(resolvedIdOrSlug)) {
-          tenant = await tenantService.getTenantById(resolvedIdOrSlug);
-        } else {
-          tenant = await tenantService.getTenantBySlug(resolvedIdOrSlug);
+      let clinicStatus: string | undefined = undefined;
+
+      if (cached && cached.expiresAt > now) {
+        tenant = cached.tenant;
+        clinicStatus = cached.clinicStatus;
+      } else {
+        // Fetch tenant from db
+        try {
+          if (UUID_REGEX.test(resolvedIdOrSlug)) {
+            tenant = await tenantService.getTenantById(resolvedIdOrSlug);
+          } else {
+            tenant = await tenantService.getTenantBySlug(resolvedIdOrSlug);
+          }
+        } catch (err) {
+          // Map to 404 or 400
+          res.status(404).json({
+            success: false,
+            error: {
+              code: 'TENANT_NOT_FOUND',
+              message: 'Resolved tenant not found.',
+              details: [],
+            },
+            requestId: req.requestId ?? '',
+          });
+          return;
         }
-      } catch (err) {
-        // Map to 404 or 400
-        res.status(404).json({
+
+        if (req.user?.clinicId && options.clinicChecker) {
+          try {
+            const clinic = await options.clinicChecker(req.user.clinicId);
+            if (clinic) {
+              clinicStatus = clinic.status;
+            }
+          } catch {
+            // Ignored
+          }
+        }
+
+        tenantResolutionCache.set(resolvedIdOrSlug, {
+          tenant,
+          clinicStatus,
+          expiresAt: now + TENANT_RESOLUTION_TTL_MS,
+        });
+        if (tenant.id !== resolvedIdOrSlug) {
+          tenantResolutionCache.set(tenant.id, {
+            tenant,
+            clinicStatus,
+            expiresAt: now + TENANT_RESOLUTION_TTL_MS,
+          });
+        }
+      }
+
+      // Enforce isolation rules — Tenant level suspension
+      if (tenant.status === TENANT_STATUS_SUSPENDED) {
+        res.status(403).json({
           success: false,
           error: {
-            code: 'TENANT_NOT_FOUND',
-            message: 'Resolved tenant not found.',
+            code: 'CLINIC_SUSPENDED',
+            message: 'Clinic access is suspended. Please contact your platform administrator.',
             details: [],
           },
           requestId: req.requestId ?? '',
@@ -118,13 +189,13 @@ export function createTenantResolutionMiddleware(
         return;
       }
 
-      // Enforce isolation rules
-      if (tenant.status === TENANT_STATUS_SUSPENDED) {
+      // Enforce Clinic level suspension if clinic context is present
+      if (clinicStatus === 'suspended') {
         res.status(403).json({
           success: false,
           error: {
-            code: 'TENANT_SUSPENDED',
-            message: 'Tenant account is suspended.',
+            code: 'CLINIC_SUSPENDED',
+            message: 'Clinic access is suspended. Please contact your platform administrator.',
             details: [],
           },
           requestId: req.requestId ?? '',

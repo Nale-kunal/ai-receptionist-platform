@@ -3,8 +3,10 @@ import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { api } from '../services/api';
+import { useAuth } from '../auth/hooks';
 
 export const ClinicSettings: React.FC = () => {
+  const { updateClinicContext } = useAuth();
   const [settings, setSettings] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -42,7 +44,11 @@ export const ClinicSettings: React.FC = () => {
     setSuccessMsg(null);
     setErrorMsg(null);
     try {
-      await api.updateClinicSettings(settings);
+      const updated = await api.updateClinicSettings(settings);
+      if (updated?.clinicName) {
+        setSettings(updated);
+        updateClinicContext?.({ name: updated.clinicName });
+      }
       setSuccessMsg('Clinic settings updated successfully.');
     } catch (err: any) {
       console.error(err);

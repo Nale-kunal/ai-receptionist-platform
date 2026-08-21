@@ -3,7 +3,7 @@
  */
 
 import type { Request, Response, NextFunction } from 'express';
-import { createTenantResolutionMiddleware } from '../middleware/tenant-resolution.middleware';
+import { createTenantResolutionMiddleware, invalidateTenantResolutionCache } from '../middleware/tenant-resolution.middleware';
 import {
   TENANT_STATUS_ACTIVE,
   TENANT_STATUS_SUSPENDED,
@@ -48,6 +48,7 @@ describe('TenantResolutionMiddleware', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    invalidateTenantResolutionCache();
     middleware = createTenantResolutionMiddleware(mockTenantService as any);
   });
 

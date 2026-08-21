@@ -63,6 +63,12 @@ export class AccountSuspendedError extends AuthError {
   }
 }
 
+export class ClinicSuspendedError extends AuthError {
+  constructor() {
+    super('Clinic access is suspended. Please contact your platform administrator.', 'CLINIC_SUSPENDED', 403);
+  }
+}
+
 export class AccountNotVerifiedError extends AuthError {
   constructor() {
     super('Your email address must be verified before you can log in.', 'AUTH_EMAIL_NOT_VERIFIED', 403);

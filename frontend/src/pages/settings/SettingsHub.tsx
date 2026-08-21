@@ -149,6 +149,7 @@ export const SettingsHub: React.FC = () => {
 // --- Inline Sub-Components ---
 
 const SettingsPractice: React.FC = () => {
+  const { updateClinicContext } = useAuth();
   const [settings, setSettings] = React.useState<any>(null);
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
@@ -175,7 +176,11 @@ const SettingsPractice: React.FC = () => {
     setMessage(null);
     try {
       const { api } = await import('../../services/api');
-      await api.updateClinicSettings(settings);
+      const updated = await api.updateClinicSettings(settings);
+      if (updated?.clinicName) {
+        setSettings(updated);
+        updateClinicContext?.({ name: updated.clinicName });
+      }
       setMessage({ type: 'success', text: 'Practice information saved.' });
     } catch {
       setMessage({ type: 'error', text: 'Failed to save. Please try again.' });
@@ -638,9 +643,6 @@ const SettingsAdvanced: React.FC<SettingsAdvancedProps> = ({ isSuperAdmin, hasRe
     { label: 'Notification Rules', description: 'Configure automated SMS and email appointment reminders.', path: '/settings/advanced/notifications', show: true },
     { label: 'Activity Log', description: 'View a record of all actions taken in your practice.', path: '/settings/advanced/activity-log', show: true },
     { label: 'Practice Reports', description: 'Analytics and reporting for your practice.', path: '/settings/advanced/analytics', show: hasReportPermission },
-    { label: 'System Diagnostics', description: 'Platform health and performance monitoring.', path: '/settings/advanced/diagnostics', show: isSuperAdmin },
-    { label: 'Organization Management', description: 'Manage multi-clinic organizations.', path: '/settings/advanced/tenants', show: hasTenantPermission },
-    { label: 'Platform Administration', description: 'Global platform configuration.', path: '/settings/advanced/platform', show: hasPlatformPermission },
   ];
 
   const visibleLinks = links.filter((l) => l.show);

@@ -11,7 +11,7 @@ interface AuthGuardProps {
 }
 
 export const AuthGuard: React.FC<AuthGuardProps> = ({ element, permission, role }) => {
-  const { user, authState, hasPermission, hasRole, logout } = useAuth();
+  const { user, authState, clinic, tenant, hasPermission, hasRole, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -26,17 +26,99 @@ export const AuthGuard: React.FC<AuthGuardProps> = ({ element, permission, role 
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // 3. Permission Check
+  // 3. Clinic / Tenant Suspension Check
+  if (
+    authState === 'suspended' ||
+    clinic?.status === 'suspended' ||
+    tenant?.status === 'suspended'
+  ) {
+    return <ClinicSuspendedScreen onLogout={logout} />;
+  }
+
+  // 4. Permission Check
   if (permission && !hasPermission(permission)) {
     return <ForbiddenScreen onLogout={logout} onBack={() => navigate('/')} />;
   }
 
-  // 4. Role Check
+  // 5. Role Check
   if (role && !hasRole(role)) {
     return <ForbiddenScreen onLogout={logout} onBack={() => navigate('/')} />;
   }
 
   return element;
+};
+
+export interface ClinicSuspendedScreenProps {
+  onLogout: () => void;
+}
+
+export const ClinicSuspendedScreen: React.FC<ClinicSuspendedScreenProps> = ({ onLogout }) => {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        minHeight: '80vh',
+        width: '100%',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '24px',
+        fontFamily: 'var(--font-sans)',
+      }}
+    >
+      <div
+        className="card"
+        style={{
+          maxWidth: '480px',
+          width: '100%',
+          boxShadow: 'var(--shadow-lg)',
+          textAlign: 'center',
+          borderTop: '4px solid var(--warning, #f59e0b)',
+          padding: '40px 32px',
+        }}
+      >
+        <div
+          style={{
+            width: '64px',
+            height: '64px',
+            borderRadius: '50%',
+            backgroundColor: 'rgba(245, 158, 11, 0.12)',
+            color: 'var(--warning, #f59e0b)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            margin: '0 auto 20px',
+          }}
+        >
+          <ShieldAlert size={32} />
+        </div>
+        <h2 style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '10px' }}>
+          Clinic Access Suspended
+        </h2>
+        <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '28px', lineHeight: '1.6' }}>
+          Your clinic account is currently suspended. Please contact your platform administrator.
+        </p>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <button
+            type="button"
+            onClick={onLogout}
+            className="btn btn-secondary"
+            style={{
+              padding: '10px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '8px',
+              fontWeight: 500,
+            }}
+          >
+            <LogOut size={16} />
+            <span>Sign Out</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 };
 
 interface ForbiddenScreenProps {

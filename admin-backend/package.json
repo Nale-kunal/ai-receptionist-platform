@@ -1,0 +1,39 @@
+{
+  "name": "dental-ai-admin-backend",
+  "version": "1.0.0",
+  "description": "Dental AI Receptionist — Platform Super Admin Backend",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "node -e \"const fs = require('fs'); if (!fs.existsSync('node_modules/.prisma') && fs.existsSync('../backend/node_modules/.prisma')) fs.cpSync('../backend/node_modules/.prisma', 'node_modules/.prisma', { recursive: true });\" && ts-node-dev --respawn --transpile-only --exit-child src/index.ts",
+    "build": "tsc --project tsconfig.json",
+    "start": "node dist/index.js",
+    "postinstall": "node -e \"const fs = require('fs'); if (fs.existsSync('../backend/node_modules/.prisma')) fs.cpSync('../backend/node_modules/.prisma', 'node_modules/.prisma', { recursive: true });\"",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "argon2": "^0.31.2",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^20.17.6",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "overrides": {
+    "tar": "^7.4.3"
+  }
+}

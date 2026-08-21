@@ -104,6 +104,17 @@ export interface IConfigurationRepository {
     offset?: number,
   ): Promise<unknown[]>;
   deactivateAll(tenantId: string, clinicId: string | null): Promise<void>;
+  syncClinicAndTenant?(
+    tenantId: string,
+    clinicId: string | null,
+    updates: {
+      name?: string;
+      phone?: string;
+      email?: string;
+      address?: string;
+      timezone?: string;
+    },
+  ): Promise<void>;
 }
 
 export interface IConfigurationCacheService {

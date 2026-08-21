@@ -460,7 +460,9 @@ async function bootstrap(): Promise<void> {
   // ── Shared middleware ──────────────────────────────────────────────────────
   const authenticate = createAuthenticateMiddleware(tokenService, sessionService, userRepo);
   const authorize = createAuthorizeMiddleware(permissionEvaluator);
-  const resolveTenant = createTenantResolutionMiddleware(tenantService);
+  const resolveTenant = createTenantResolutionMiddleware(tenantService, {
+    clinicChecker: async (id: string) => clinicRepo.findById(id),
+  });
 
   const dashboardRouter = createDashboardRoutes({
     controller: dashboardController,

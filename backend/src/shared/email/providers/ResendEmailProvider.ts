@@ -39,10 +39,10 @@ export class ResendEmailProvider implements IEmailProvider {
       let targetRecipient = options.to;
       const fromAddress = options.from || this.defaultFrom;
       const isDevOnboarding = fromAddress.includes('onboarding@resend.dev') || process.env['NODE_ENV'] === 'development';
-      const devOverride = process.env['RESEND_TEST_RECIPIENT_OVERRIDE'] || 'nalekunal343@gmail.com';
+      const devOverride = process.env['RESEND_TEST_RECIPIENT_OVERRIDE'];
 
-      if (isDevOnboarding && targetRecipient !== devOverride) {
-        console.info(`[ResendEmailProvider] 🔀 Dev Mode Override: Routing outbound mail from '${targetRecipient}' -> '${devOverride}' (Resend onboarding restriction requirement)`);
+      if (isDevOnboarding && devOverride && targetRecipient !== devOverride) {
+        console.info(`[ResendEmailProvider] Dev Mode Override: Routing outbound mail from '${targetRecipient}' -> '${devOverride}'`);
         targetRecipient = devOverride;
       }
 

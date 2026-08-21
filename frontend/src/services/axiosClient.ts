@@ -90,6 +90,16 @@ axiosClient.interceptors.response.use(
       });
     }
 
+    // If backend reports clinic or tenant is suspended, immediately clear token and dispatch auth_clinic_suspended
+    if (error.response?.status === 403) {
+      const errorCode = error.response?.data?.error?.code;
+      if (errorCode === 'CLINIC_SUSPENDED' || errorCode === 'TENANT_SUSPENDED') {
+        tokenManager.clear();
+        window.dispatchEvent(new Event('auth_clinic_suspended'));
+      }
+      return Promise.reject(error);
+    }
+
     // Avoid token refresh loops if authentication endpoints fail or if originalRequest was already retried.
     // SECURITY: Only dispatch auth_unauthorized on genuine 401 responses — never on 500, 403, or network
     // errors, which would cause spurious logouts when the backend has an unrelated failure.

@@ -149,15 +149,15 @@ export function useRecentConversations(): WidgetState<any[]> {
 
     setLoading(true);
     try {
-      const summary = await circuitBreaker.execute(async () => {
+      const conversationsData = await circuitBreaker.execute(async () => {
         return requestCoordinator.fetchWidgetData<any>(
-          'dashboard_summary',
-          '/dashboard/summary',
-          { signal: abortRef.current?.signal }
+          'dashboard_conversations',
+          '/dashboard/conversations',
+          { signal: abortRef.current?.signal, cacheTtlMs: 15000 }
         );
       });
 
-      const conversations = Array.isArray(summary?.conversations) ? summary.conversations : [];
+      const conversations = Array.isArray(conversationsData) ? conversationsData : [];
       setData(conversations.slice(0, 5));
       setError(null);
     } catch (err: any) {

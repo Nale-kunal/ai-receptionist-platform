@@ -28,9 +28,9 @@ interface WhatsAppIntegration {
   publicId?: string;
   tenantId: string;
   clinicId: string;
+  // Note: phoneNumberId, wabaId, webhookVerifyToken are intentionally
+  // excluded from this type — they are managed by the Platform Admin only.
   phoneNumber: string;
-  phoneNumberId: string;
-  wabaId: string;
   displayName: string;
   status: 'active' | 'inactive' | 'suspended';
   isEnabled: boolean;
@@ -50,12 +50,12 @@ interface WhatsAppIntegration {
   updatedAt: string;
 }
 
+// Clinic-facing form — only collects business-level info.
+// Technical Meta credentials (phoneNumberId, wabaId, webhookVerifyToken)
+// are set exclusively by the Platform Admin via the admin console.
 interface CreateIntegrationForm {
   phoneNumber: string;
-  phoneNumberId: string;
-  wabaId: string;
   displayName: string;
-  webhookVerifyToken: string;
   greeting: string;
   bookingEnabled: boolean;
   rescheduleEnabled: boolean;
@@ -67,10 +67,7 @@ interface CreateIntegrationForm {
 
 const DEFAULT_CREATE_FORM: CreateIntegrationForm = {
   phoneNumber: '',
-  phoneNumberId: '',
-  wabaId: '',
   displayName: '',
-  webhookVerifyToken: '',
   greeting: "Hello! I'm your dental clinic assistant. How can I help you today?",
   bookingEnabled: true,
   rescheduleEnabled: true,
@@ -149,12 +146,11 @@ const WhatsAppPanel: React.FC<{ clinicId: string; tenantId: string }> = ({ clini
     setSaving(true);
     setCreateError(null);
     try {
+      // Only send clinic-configurable fields.
+      // phoneNumberId, wabaId, webhookVerifyToken are provisioned by the Platform Admin.
       await createIntegration(clinicId, {
         phoneNumber: createForm.phoneNumber.trim(),
-        phoneNumberId: createForm.phoneNumberId.trim(),
-        wabaId: createForm.wabaId.trim(),
         displayName: createForm.displayName.trim(),
-        webhookVerifyToken: createForm.webhookVerifyToken.trim(),
         settings: {
           greeting: createForm.greeting,
           bookingEnabled: createForm.bookingEnabled,
@@ -172,7 +168,7 @@ const WhatsAppPanel: React.FC<{ clinicId: string; tenantId: string }> = ({ clini
       setCreateError(
         err?.response?.data?.error?.message
           ?? err?.response?.data?.details?.[0]?.message
-          ?? 'Failed to create integration. Please check the details and try again.'
+          ?? 'Failed to register. Please check the phone number and try again.'
       );
     } finally {
       setSaving(false);
@@ -327,8 +323,12 @@ const WhatsAppPanel: React.FC<{ clinicId: string; tenantId: string }> = ({ clini
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)', fontSize: '0.8rem', marginBottom: '8px' }}>
                   <Phone size={12} />
                   <span style={{ fontFamily: 'monospace' }}>{integration.phoneNumber}</span>
-                  <span style={{ opacity: 0.5 }}>·</span>
-                  <span style={{ opacity: 0.7 }}>WABA: {integration.wabaId.slice(0, 10)}…</span>
+                  {(integration as any).wabaId && (
+                    <>
+                      <span style={{ opacity: 0.5 }}>·</span>
+                      <span style={{ opacity: 0.7 }}>WABA: {(integration as any).wabaId.slice(0, 10)}…</span>
+                    </>
+                  )}
                 </div>
                 {/* Feature toggles */}
                 <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
@@ -395,35 +395,22 @@ const WhatsAppPanel: React.FC<{ clinicId: string; tenantId: string }> = ({ clini
         </div>
       )}
 
-      {/* Webhook info box */}
+      {/* Status info — shown when connected numbers exist */}
       {integrations.length > 0 && (
         <div style={{
           marginTop: '16px', padding: '12px 16px', borderRadius: 'var(--radius)',
-          backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)',
-          fontSize: '0.78rem', color: 'var(--text-secondary)',
+          backgroundColor: 'rgba(37, 211, 102, 0.06)', border: '1px solid rgba(37, 211, 102, 0.2)',
+          fontSize: '0.8rem', color: 'var(--text-secondary)',
+          display: 'flex', alignItems: 'center', gap: '8px',
         }}>
-          <code style={{
-            display: 'block', marginTop: '4px', wordBreak: 'break-all',
-            backgroundColor: 'var(--bg-primary)', padding: '6px 10px', borderRadius: '6px',
-            fontSize: '0.75rem', color: 'var(--text-primary)',
-          }}>
-            {(() => {
-              const apiUrl = import.meta.env.VITE_API_URL;
-              if (apiUrl) {
-                const base = apiUrl.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
-                return `${base}/api/v1/webhooks/whatsapp`;
-              }
-              return 'http://localhost:3000/api/v1/webhooks/whatsapp';
-            })()}
-          </code>
-          <p style={{ marginTop: '6px', marginBottom: 0 }}>
-            Register this URL in your Meta App dashboard under WhatsApp → Configuration.
-            Use the <code>webhookVerifyToken</code> you set when creating the integration.
-          </p>
+          <CheckCircle size={14} style={{ color: '#25D366', flexShrink: 0 }} />
+          <span>
+            Your WhatsApp channel is managed by the platform. Contact support if you experience any issues.
+          </span>
         </div>
       )}
 
-      {/* Create Modal */}
+      {/* Create Modal — Clinic-facing: no Meta credentials */}
       {showCreateModal && (
         <Modal
           isOpen={showCreateModal}
@@ -440,10 +427,20 @@ const WhatsAppPanel: React.FC<{ clinicId: string; tenantId: string }> = ({ clini
               </div>
             )}
 
+            {/* Info banner — explain the setup process */}
+            <div style={{
+              padding: '10px 14px', borderRadius: 'var(--radius)',
+              backgroundColor: 'rgba(37, 211, 102, 0.06)', border: '1px solid rgba(37, 211, 102, 0.2)',
+              fontSize: '0.8rem', color: 'var(--text-secondary)',
+            }}>
+              <strong style={{ color: 'var(--text-primary)' }}>How it works:</strong> Register your WhatsApp phone number
+              and AI settings below. Our team will complete the technical connection to Meta within 24 hours.
+            </div>
+
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
               <div>
                 <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '5px' }}>
-                  Phone Number (E.164) *
+                  WhatsApp Phone Number (E.164) *
                 </label>
                 <Input
                   id="wa-phone"
@@ -453,35 +450,8 @@ const WhatsAppPanel: React.FC<{ clinicId: string; tenantId: string }> = ({ clini
                   required
                 />
                 <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '3px' }}>
-                  Format: +[country][number]
+                  Include country code, e.g. +1 (US), +44 (UK), +91 (India).
                 </p>
-              </div>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '5px' }}>
-                  Phone Number ID *
-                </label>
-                <Input
-                  id="wa-phone-id"
-                  placeholder="From Meta Business Manager"
-                  value={createForm.phoneNumberId}
-                  onChange={(e) => setCreateForm(f => ({ ...f, phoneNumberId: e.target.value }))}
-                  required
-                />
-              </div>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '5px' }}>
-                  WABA ID *
-                </label>
-                <Input
-                  id="wa-waba-id"
-                  placeholder="WhatsApp Business Account ID"
-                  value={createForm.wabaId}
-                  onChange={(e) => setCreateForm(f => ({ ...f, wabaId: e.target.value }))}
-                  required
-                />
               </div>
               <div>
                 <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '5px' }}>
@@ -489,29 +459,12 @@ const WhatsAppPanel: React.FC<{ clinicId: string; tenantId: string }> = ({ clini
                 </label>
                 <Input
                   id="wa-display-name"
-                  placeholder="City Dental Clinic WA"
+                  placeholder="City Dental Clinic"
                   value={createForm.displayName}
                   onChange={(e) => setCreateForm(f => ({ ...f, displayName: e.target.value }))}
                   required
                 />
               </div>
-            </div>
-
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '5px' }}>
-                Webhook Verify Token *
-              </label>
-              <Input
-                id="wa-verify-token"
-                placeholder="Secure random string (min 8 chars)"
-                value={createForm.webhookVerifyToken}
-                onChange={(e) => setCreateForm(f => ({ ...f, webhookVerifyToken: e.target.value }))}
-                required
-                minLength={8}
-              />
-              <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '3px' }}>
-                Enter the same value in your Meta App Webhook configuration.
-              </p>
             </div>
 
             <hr style={{ border: 'none', borderTop: '1px solid var(--border-color)' }} />
@@ -792,105 +745,98 @@ const SettingsModal: React.FC<{
 export const Integrations: React.FC = () => {
   const { clinic, tenant } = useAuth();
 
+  const effectiveClinicId = clinic?.id || tenant?.id || '';
+  const effectiveTenantId = tenant?.id || '';
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', width: '100%' }}>
       {/* Page Header */}
       <div>
         <h1 style={{ fontSize: '1.6rem', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
-          Integrations
+          Communication Channels
         </h1>
         <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginTop: '4px' }}>
-          Manage communication channels and third-party integrations.
+          Configure WhatsApp, notification email preferences, and AI Receptionist channels for your clinic.
         </p>
       </div>
 
-      {/* WhatsApp Section */}
+      {/* WhatsApp Business Channel Section */}
       <Card>
-        {clinic && tenant ? (
-          <WhatsAppPanel clinicId={clinic.id} tenantId={tenant.id} />
+        {effectiveClinicId && effectiveTenantId ? (
+          <WhatsAppPanel clinicId={effectiveClinicId} tenantId={effectiveTenantId} />
         ) : (
           <div style={{ textAlign: 'center', padding: '32px', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-            No clinic context available. Please ensure you are logged in with a clinic selected.
+            <RefreshCw className="spin" size={20} style={{ margin: '0 auto 8px' }} />
+            Loading communication channels…
           </div>
         )}
       </Card>
 
-      {/* OpenAI Card */}
+      {/* Voice & AI Receptionist Channel */}
       <Card>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <div style={{
               width: '40px', height: '40px', borderRadius: '10px',
-              background: 'linear-gradient(135deg, #10a37f 0%, #0d7a5f 100%)',
+              background: 'linear-gradient(135deg, #3B82F6 0%, #1D4ED8 100%)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: '1.1rem', fontWeight: 900, color: 'white',
-            }}>AI</div>
+              fontSize: '1.1rem', color: 'white',
+            }}>
+              <Phone size={20} />
+            </div>
             <div>
               <h3 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '4px', color: 'var(--text-primary)' }}>
-                OpenAI Developer API
+                Voice & AI Receptionist
               </h3>
               <p style={{ fontSize: '0.83rem', color: 'var(--text-secondary)', margin: 0 }}>
-                Powers the AI receptionist and WhatsApp AI booking engine (GPT-4o-mini).
+                Answers incoming clinic calls 24/7, handles appointment booking, FAQs, and emergency call routing.
               </p>
             </div>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
-            <Badge variant="success">Connected</Badge>
-            <span style={{ fontSize: '0.73rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
-              sk-proj-••••••••••••
-            </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <Badge variant="success">Active</Badge>
+            <Button
+              variant="secondary"
+              onClick={() => window.location.href = '/ai-receptionist/assistant'}
+              style={{ fontSize: '0.8rem', padding: '8px 14px' }}
+            >
+              Configure AI Behavior
+            </Button>
           </div>
         </div>
       </Card>
 
-      {/* Twilio Card */}
+      {/* Clinic Email Notifications */}
       <Card>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             <div style={{
               width: '40px', height: '40px', borderRadius: '10px',
-              background: 'linear-gradient(135deg, #f22f46 0%, #c11f34 100%)',
+              background: 'linear-gradient(135deg, #8B5CF6 0%, #6D28D9 100%)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: '0.7rem', fontWeight: 900, color: 'white', letterSpacing: '0.05em',
-            }}>TWL</div>
+              color: 'white',
+            }}>
+              <MessageSquare size={20} />
+            </div>
             <div>
               <h3 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '4px', color: 'var(--text-primary)' }}>
-                Twilio Telephony Provider
+                Notification Email Channel
               </h3>
               <p style={{ fontSize: '0.83rem', color: 'var(--text-secondary)', margin: 0 }}>
-                Handles inbound voice calls and media streams for the voice AI receptionist.
+                Receives appointment confirmations, daily schedule digests, and staff alert emails.
               </p>
             </div>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
-            <Badge variant="success">Connected</Badge>
-            <span style={{ fontSize: '0.73rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
-              AC••••••••••••••••
-            </span>
-          </div>
-        </div>
-      </Card>
-
-      {/* Google Calendar — future */}
-      <Card style={{ opacity: 0.7 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <div style={{
-              width: '40px', height: '40px', borderRadius: '10px',
-              background: 'linear-gradient(135deg, #4285F4 0%, #34A853 50%, #FBBC05 75%, #EA4335 100%)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: '0.65rem', fontWeight: 900, color: 'white',
-            }}>GCal</div>
-            <div>
-              <h3 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '4px', color: 'var(--text-primary)' }}>
-                Google Calendar
-              </h3>
-              <p style={{ fontSize: '0.83rem', color: 'var(--text-secondary)', margin: 0 }}>
-                Doctor calendar sync — two-way appointment synchronisation (coming soon).
-              </p>
-            </div>
+            <Badge variant="success">Configured</Badge>
+            <Button
+              variant="secondary"
+              onClick={() => window.location.href = '/settings/practice'}
+              style={{ fontSize: '0.8rem', padding: '8px 14px' }}
+            >
+              Update Email Settings
+            </Button>
           </div>
-          <Badge variant="warning">Coming Soon</Badge>
         </div>
       </Card>
     </div>

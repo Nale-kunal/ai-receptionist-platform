@@ -1,4 +1,4 @@
-export type AuthState = 'unknown' | 'initializing' | 'authenticated' | 'unauthenticated';
+export type AuthState = 'unknown' | 'initializing' | 'authenticated' | 'unauthenticated' | 'suspended';
 
 export interface User {
   id: string;
@@ -51,4 +51,6 @@ export interface AuthContextType {
   resendVerification: (email: string) => Promise<void>;
   hasPermission: (permission: string) => boolean;
   hasRole: (role: string) => boolean;
+  updateClinicContext: (updates: Partial<ClinicInfo>) => void;
+  refreshSession: () => Promise<void>;
 }

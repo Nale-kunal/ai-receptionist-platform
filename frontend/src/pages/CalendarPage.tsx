@@ -78,6 +78,20 @@ export const CalendarPage: React.FC = () => {
 
   useEffect(() => {
     loadData();
+
+    const handleRevalidate = () => {
+      if (document.visibilityState === 'visible') {
+        loadData();
+      }
+    };
+
+    window.addEventListener('focus', handleRevalidate);
+    document.addEventListener('visibilitychange', handleRevalidate);
+
+    return () => {
+      window.removeEventListener('focus', handleRevalidate);
+      document.removeEventListener('visibilitychange', handleRevalidate);
+    };
   }, [loadData]);
 
   // Navigate dates

@@ -115,4 +115,68 @@ export class ConfigurationRepository implements IConfigurationRepository {
       },
     });
   }
+
+  public async syncClinicAndTenant(
+    tenantId: string,
+    clinicId: string | null,
+    updates: {
+      name?: string;
+      phone?: string;
+      email?: string;
+      address?: string;
+      timezone?: string;
+    },
+  ): Promise<void> {
+    const clinicUpdateData: Record<string, any> = {};
+    if (updates.name && updates.name.trim().length > 0) {
+      clinicUpdateData.name = updates.name.trim();
+    }
+    if (updates.phone !== undefined) {
+      clinicUpdateData.primaryPhone = updates.phone;
+    }
+    if (updates.email !== undefined) {
+      clinicUpdateData.primaryEmail = updates.email;
+    }
+    if (updates.address !== undefined) {
+      clinicUpdateData.address = updates.address;
+    }
+    if (updates.timezone !== undefined && updates.timezone.trim().length > 0) {
+      clinicUpdateData.timezone = updates.timezone.trim();
+    }
+
+    if (Object.keys(clinicUpdateData).length > 0) {
+      let targetClinicId = clinicId;
+      if (!targetClinicId) {
+        const found = await this.prisma.clinic.findFirst({
+          where: { tenantId, deletedAt: null },
+          orderBy: { createdAt: 'asc' },
+          select: { id: true },
+        });
+        if (found) {
+          targetClinicId = found.id;
+        }
+      }
+
+      if (targetClinicId) {
+        await this.prisma.clinic.update({
+          where: { id: targetClinicId },
+          data: clinicUpdateData,
+        });
+      }
+
+      const tenantUpdateData: Record<string, any> = {};
+      if (clinicUpdateData.name) {
+        tenantUpdateData.name = clinicUpdateData.name;
+      }
+      if (clinicUpdateData.timezone) {
+        tenantUpdateData.timezone = clinicUpdateData.timezone;
+      }
+      if (Object.keys(tenantUpdateData).length > 0) {
+        await this.prisma.tenant.update({
+          where: { id: tenantId },
+          data: tenantUpdateData,
+        });
+      }
+    }
+  }
 }

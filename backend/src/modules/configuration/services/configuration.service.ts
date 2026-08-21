@@ -339,6 +339,31 @@ export class ConfigurationService implements IConfigurationService {
       providers,
     });
 
+    // Synchronize canonical Clinic and Tenant PostgreSQL tables if identity fields are present
+    const clinicName = (params.business as any)?.clinicName;
+    const contactPhone = (params.business as any)?.contactPhone;
+    const contactEmail = (params.business as any)?.contactEmail;
+    const address = (params.business as any)?.address;
+    const tz = localization.timezone || (params.business as any)?.timezone;
+
+    if (
+      clinicName !== undefined ||
+      contactPhone !== undefined ||
+      contactEmail !== undefined ||
+      address !== undefined ||
+      tz !== undefined
+    ) {
+      if (this.repository.syncClinicAndTenant) {
+        await this.repository.syncClinicAndTenant(params.tenantId, params.clinicId, {
+          name: clinicName,
+          phone: contactPhone,
+          email: contactEmail,
+          address: address,
+          timezone: tz,
+        });
+      }
+    }
+
     const safeConfig = this.mapToSafeConfig(updated);
 
     // Invalidate and update cache

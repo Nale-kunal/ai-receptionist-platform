@@ -36,7 +36,7 @@ import { VerifyEmailSchema } from '../validators/verify-email.validator';
 import { ResendVerificationSchema } from '../validators/resend-verification.validator';
 
 import { REFRESH_TOKEN_COOKIE_NAME, REFRESH_TOKEN_TTL_SECONDS } from '../constants/auth.constants';
-import { AuthError } from '../errors/auth.errors';
+import { AuthError, ClinicSuspendedError } from '../errors/auth.errors';
 
 // --------------------------------------------------------------------------
 // Device Info Parser
@@ -205,6 +205,8 @@ export class AuthController {
         user: result.user,
         roles: result.roles || [result.user.role],
         permissions: result.permissions || ['*'],
+        tenant: result.tenant ?? null,
+        clinic: result.clinic ?? null,
       });
     } catch (error) {
       next(error);
@@ -438,6 +440,22 @@ export class AuthController {
         return;
       }
 
+      if (
+        user.tenant?.status === 'suspended' ||
+        user.clinic?.status === 'suspended'
+      ) {
+        res.status(403).json({
+          success: false,
+          error: {
+            code: 'CLINIC_SUSPENDED',
+            message: 'Clinic access is suspended. Please contact your platform administrator.',
+            details: [],
+          },
+          requestId,
+        });
+        return;
+      }
+
       const resolved = await this.permissionEvaluator.resolvePermissions({
         userId: user.id,
         tenantId: user.tenantId,
@@ -504,6 +522,33 @@ export class AuthController {
           const payload = this.tokenService.verifyAccessToken(rawToken);
           const user = await this.userRepository.findByIdWithRelations(payload.sub);
           if (user && user.tokenVersion === payload.tokenVersion) {
+            if (
+              user.tenant?.status === 'suspended' ||
+              user.clinic?.status === 'suspended'
+            ) {
+              clearRefreshTokenCookie(res);
+              sendSuccess(res, {
+                authenticated: false,
+                suspended: true,
+                error: {
+                  code: 'CLINIC_SUSPENDED',
+                  message: 'Clinic access is suspended. Please contact your platform administrator.',
+                },
+                user: null,
+                tenant: user.tenant ? {
+                  id: user.tenant.id,
+                  name: user.tenant.name,
+                  status: user.tenant.status,
+                } : null,
+                clinic: user.clinic ? {
+                  id: user.clinic.id,
+                  name: user.clinic.name,
+                  status: user.clinic.status,
+                } : null,
+              });
+              return;
+            }
+
             const resolved = await this.permissionEvaluator.resolvePermissions({
               userId: user.id,
               tenantId: user.tenantId,
@@ -567,6 +612,33 @@ export class AuthController {
           const payload = this.tokenService.verifyAccessToken(refreshResult.accessToken);
           const user = await this.userRepository.findByIdWithRelations(payload.sub);
           if (user) {
+            if (
+              user.tenant?.status === 'suspended' ||
+              user.clinic?.status === 'suspended'
+            ) {
+              clearRefreshTokenCookie(res);
+              sendSuccess(res, {
+                authenticated: false,
+                suspended: true,
+                error: {
+                  code: 'CLINIC_SUSPENDED',
+                  message: 'Clinic access is suspended. Please contact your platform administrator.',
+                },
+                user: null,
+                tenant: user.tenant ? {
+                  id: user.tenant.id,
+                  name: user.tenant.name,
+                  status: user.tenant.status,
+                } : null,
+                clinic: user.clinic ? {
+                  id: user.clinic.id,
+                  name: user.clinic.name,
+                  status: user.clinic.status,
+                } : null,
+              });
+              return;
+            }
+
             const resolved = await this.permissionEvaluator.resolvePermissions({
               userId: user.id,
               tenantId: user.tenantId,
@@ -608,9 +680,21 @@ export class AuthController {
             });
             return;
           }
-        } catch (err) {
+        } catch (err: any) {
           console.error('[auth.controller] session refresh error:', err);
           clearRefreshTokenCookie(res);
+          if (err?.code === 'CLINIC_SUSPENDED' || err instanceof ClinicSuspendedError) {
+            sendSuccess(res, {
+              authenticated: false,
+              suspended: true,
+              error: {
+                code: 'CLINIC_SUSPENDED',
+                message: 'Clinic access is suspended. Please contact your platform administrator.',
+              },
+              user: null,
+            });
+            return;
+          }
           sendSuccess(res, { authenticated: false, user: null });
           return;
         }

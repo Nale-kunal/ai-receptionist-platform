@@ -43,6 +43,7 @@ import {
   InvalidCredentialsError,
   AccountLockedError,
   AccountSuspendedError,
+  ClinicSuspendedError,
   AccountInactiveError,
   AccountNotVerifiedError,
   InvalidRefreshTokenError,
@@ -297,6 +298,14 @@ export class AuthService implements IAuthService {
       throw new AccountInactiveError();
     }
 
+    // Step 4b — Check tenant/clinic status
+    if (this.tenantRepository && user.tenantId) {
+      const tenant = await this.tenantRepository.findById(user.tenantId);
+      if (tenant && (tenant.status === 'suspended' || tenant.status === 'TENANT_SUSPENDED')) {
+        throw new ClinicSuspendedError();
+      }
+    }
+
     // Step 5 — Check email verification
     if (!user.emailVerified) {
       throw new AccountNotVerifiedError();
@@ -362,6 +371,10 @@ export class AuthService implements IAuthService {
       return ['clinic:read', 'appointment:read', 'appointment:write', 'patient:read', 'patient:write', 'conversation:read'];
     };
 
+    const userWithRelations = this.userRepository.findByIdWithRelations
+      ? await this.userRepository.findByIdWithRelations(user.id)
+      : null;
+
     return {
       accessToken,
       accessTokenExpiresAt,
@@ -370,6 +383,21 @@ export class AuthService implements IAuthService {
       user: this.toSafeUser(user),
       roles: [user.role],
       permissions: getRolePermissions(user.role),
+      tenant: userWithRelations?.tenant ? {
+        id: userWithRelations.tenant.id,
+        publicId: userWithRelations.tenant.publicId,
+        name: userWithRelations.tenant.name,
+        slug: userWithRelations.tenant.slug,
+        subscriptionPlan: userWithRelations.tenant.subscriptionPlan,
+        status: userWithRelations.tenant.status,
+      } : null,
+      clinic: userWithRelations?.clinic ? {
+        id: userWithRelations.clinic.id,
+        publicId: userWithRelations.clinic.publicId,
+        name: userWithRelations.clinic.name,
+        slug: userWithRelations.clinic.slug,
+        status: userWithRelations.clinic.status,
+      } : null,
     };
   }
 
@@ -453,6 +481,14 @@ export class AuthService implements IAuthService {
           throw new InvalidRefreshTokenError();
         }
 
+        if (this.tenantRepository && user.tenantId) {
+          const tenant = await this.tenantRepository.findById(user.tenantId);
+          if (tenant && (tenant.status === 'suspended' || tenant.status === 'TENANT_SUSPENDED')) {
+            await this.sessionService.revokeSession(activeSessionId);
+            throw new ClinicSuspendedError();
+          }
+        }
+
         const accessTokenPayload = {
           sub: user.id,
           tenantId: user.tenantId,
@@ -495,6 +531,15 @@ export class AuthService implements IAuthService {
     if (!user || user.status !== 'active') {
       await this.sessionService.revokeSession(activeSessionId);
       throw new InvalidRefreshTokenError();
+    }
+
+    // Step 4b — Check tenant/clinic status
+    if (this.tenantRepository && user.tenantId) {
+      const tenant = await this.tenantRepository.findById(user.tenantId);
+      if (tenant && (tenant.status === 'suspended' || tenant.status === 'TENANT_SUSPENDED')) {
+        await this.sessionService.revokeSession(activeSessionId);
+        throw new ClinicSuspendedError();
+      }
     }
 
     // Step 5 — Check token version (catches revoke-all scenarios)

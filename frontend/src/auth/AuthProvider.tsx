@@ -35,6 +35,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     activeSessionPromise = (async () => {
       try {
         const sessionData = await authService.getSession();
+        if (
+          sessionData?.suspended ||
+          sessionData?.error?.code === 'CLINIC_SUSPENDED' ||
+          sessionData?.tenant?.status === 'suspended' ||
+          sessionData?.clinic?.status === 'suspended'
+        ) {
+          tokenManager.clear();
+          setUser(null);
+          setRoles([]);
+          setPermissions([]);
+          setTenant(sessionData.tenant ?? null);
+          setClinic(sessionData.clinic ?? null);
+          setAuthState('suspended');
+          setLoading(false);
+          return;
+        }
+
         if (sessionData && sessionData.authenticated && sessionData.accessToken && sessionData.user) {
           tokenManager.setToken(sessionData.accessToken);
           setUser(sessionData.user);
@@ -55,7 +72,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setClinic(null);
           setAuthState('unauthenticated');
         }
-      } catch {
+      } catch (err: any) {
+        const errorCode = err?.response?.data?.error?.code;
+        if (errorCode === 'CLINIC_SUSPENDED' || errorCode === 'TENANT_SUSPENDED') {
+          tokenManager.clear();
+          setUser(null);
+          setRoles([]);
+          setPermissions([]);
+          setTenant(null);
+          setClinic(null);
+          setAuthState('suspended');
+          setLoading(false);
+          return;
+        }
         tokenManager.clear();
         setUser(null);
         setRoles([]);
@@ -88,6 +117,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setLoading(false);
     };
 
+    // Listen for clinic suspended event from axios client
+    const handleClinicSuspended = () => {
+      tokenManager.clear();
+      setUser(null);
+      setRoles([]);
+      setPermissions([]);
+      setClinic((prev) => prev ? { ...prev, status: 'suspended' } : null);
+      setTenant((prev) => prev ? { ...prev, status: 'suspended' } : null);
+      setAuthState('suspended');
+      setLoading(false);
+    };
+
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'auth_logout_event') {
         handleUnauthorized();
@@ -95,9 +136,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
 
     window.addEventListener('auth_unauthorized', handleUnauthorized);
+    window.addEventListener('auth_clinic_suspended', handleClinicSuspended);
     window.addEventListener('storage', handleStorageChange);
     return () => {
       window.removeEventListener('auth_unauthorized', handleUnauthorized);
+      window.removeEventListener('auth_clinic_suspended', handleClinicSuspended);
       window.removeEventListener('storage', handleStorageChange);
     };
   }, [recoverSession]);
@@ -133,7 +176,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       setAuthState('authenticated');
-    } catch (err) {
+    } catch (err: any) {
+      const errorCode = err?.response?.data?.error?.code;
+      if (errorCode === 'CLINIC_SUSPENDED' || errorCode === 'TENANT_SUSPENDED') {
+        tokenManager.clear();
+        setUser(null);
+        setRoles([]);
+        setPermissions([]);
+        setTenant(null);
+        setClinic(null);
+        setAuthState('suspended');
+        throw err;
+      }
       setAuthState('unauthenticated');
       throw err;
     } finally {
@@ -224,6 +278,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [user, roles]
   );
 
+  const updateClinicContext = useCallback((updates: Partial<ClinicInfo>) => {
+    setClinic((prev) => (prev ? { ...prev, ...updates } : (updates as ClinicInfo)));
+    if (updates.name) {
+      setTenant((prev) => (prev ? { ...prev, name: updates.name! } : null));
+    }
+  }, []);
+
+  const refreshSession = useCallback(async () => {
+    try {
+      const meData = await authService.fetchMe();
+      if (meData?.clinic) setClinic(meData.clinic);
+      if (meData?.tenant) setTenant(meData.tenant);
+      if (meData?.user) setUser(meData.user);
+    } catch {
+      // Ignored
+    }
+  }, []);
+
   const contextValue = useMemo(
     () => ({
       user,
@@ -242,6 +314,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       resendVerification,
       hasPermission,
       hasRole,
+      updateClinicContext,
+      refreshSession,
     }),
     [
       user,
@@ -253,6 +327,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       authState,
       hasPermission,
       hasRole,
+      updateClinicContext,
+      refreshSession,
     ]
   );
 
