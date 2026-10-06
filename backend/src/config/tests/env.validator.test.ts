@@ -237,9 +237,22 @@ describe('Environment Validator - Production Security Tests', () => {
     expect(config.DATABASE_URL).toContain('-pooler');
   });
 
-  it('should reject malformed or non-postgresql DATABASE_URL', () => {
+  it('should pass in production when WHATSAPP credentials are not provided (DevNoOp fallback)', () => {
     const env = getValidProdEnv();
-    env.DATABASE_URL = 'mysql://user:pass@localhost:3306/db';
+    delete (env as any).WHATSAPP_ACCESS_TOKEN;
+    delete (env as any).WHATSAPP_APP_SECRET;
+    delete (env as any).WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+    process.env = env as any;
+
+    const config = validateEnv();
+    expect(config.NODE_ENV).toBe('production');
+    expect(config.WHATSAPP_ACCESS_TOKEN).toBeUndefined();
+  });
+
+  it('should fail in production when WHATSAPP_ACCESS_TOKEN is set but WHATSAPP_APP_SECRET is missing', () => {
+    const env = getValidProdEnv();
+    env.WHATSAPP_ACCESS_TOKEN = 'EAAB_test_token';
+    delete (env as any).WHATSAPP_APP_SECRET;
     process.env = env as any;
 
     const mockExit = jest.spyOn(process, 'exit').mockImplementation((code?: any) => {

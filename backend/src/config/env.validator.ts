@@ -219,17 +219,17 @@ export function validateEnv(): ValidatedBackendEnv {
       console.error('❌ FATAL: RESEND_API_KEY environment variable is required in production when EMAIL_PROVIDER=resend!');
       process.exit(1);
     }
-    if (!result.data.WHATSAPP_ACCESS_TOKEN) {
-      console.error('❌ FATAL: WHATSAPP_ACCESS_TOKEN is required in production mode!');
-      process.exit(1);
-    }
-    if (!result.data.WHATSAPP_APP_SECRET) {
-      console.error('❌ FATAL: WHATSAPP_APP_SECRET is required in production mode!');
-      process.exit(1);
-    }
-    if (!result.data.WHATSAPP_WEBHOOK_VERIFY_TOKEN) {
-      console.error('❌ FATAL: WHATSAPP_WEBHOOK_VERIFY_TOKEN is required in production mode!');
-      process.exit(1);
+    if (result.data.WHATSAPP_ACCESS_TOKEN) {
+      if (!result.data.WHATSAPP_APP_SECRET) {
+        console.error('❌ FATAL: WHATSAPP_APP_SECRET is required when WHATSAPP_ACCESS_TOKEN is configured!');
+        process.exit(1);
+      }
+      if (!result.data.WHATSAPP_WEBHOOK_VERIFY_TOKEN) {
+        console.error('❌ FATAL: WHATSAPP_WEBHOOK_VERIFY_TOKEN is required when WHATSAPP_ACCESS_TOKEN is configured!');
+        process.exit(1);
+      }
+    } else {
+      console.warn('⚠️ [env.validator] WhatsApp credentials not configured. WhatsApp channel will operate in safe DevNoOp mock mode.');
     }
   }
 
