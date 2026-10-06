@@ -18,7 +18,10 @@ export interface ApiAppointment {
   time: string;
   status: 'scheduled' | 'rescheduled' | 'cancelled' | 'completed' | 'pending' | 'confirmed' | 'checked_in' | 'in_progress' | 'no_show';
   appointmentType?: string;
+  otherReason?: string;
   durationMinutes?: number;
+  notes?: string;
+  timezone?: string;
 }
 
 export interface ApiPatient {
@@ -148,8 +151,9 @@ export function parseAppointmentItem(a: any): ApiAppointment {
     date: date || new Date().toISOString().split('T')[0],
     time: time || '09:00',
     status: a.status,
-    appointmentType: a.appointmentType || 'checkup',
+    appointmentType: a.appointmentType || 'routine_checkup',
     durationMinutes: Number(a.durationMinutes) || 30,
+    notes: a.notes || undefined,
   };
 }
 
@@ -342,7 +346,8 @@ export const api = {
       }
     }
 
-    // Convert date & time to UTC ISO strings
+    // Dynamic Client Timezone
+    const clientTz = (apt as any).timezone || (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC');
     const duration = (apt as any).durationMinutes || 30;
     const startTime = new Date(`${apt.date}T${apt.time}:00`);
     const endTime = new Date(startTime.getTime() + duration * 60000);
@@ -352,34 +357,57 @@ export const api = {
       patientId,
       startTime: startTime.toISOString(),
       endTime: endTime.toISOString(),
-      timezone: 'UTC',
+      timezone: clientTz,
       status: 'scheduled',
-      source: 'dashboard',
-      appointmentType: (apt as any).appointmentType || 'checkup',
+      source: (apt as any).source || 'dashboard',
+      appointmentType: (apt as any).appointmentType || 'routine_checkup',
+      otherReason: (apt as any).otherReason || undefined,
       durationMinutes: duration,
+      notes: (apt as any).notes || undefined,
     };
     const res = await axiosClient.post('/appointments', payload);
 
     const created = res.data?.data?.appointment || res.data?.data || res.data;
     return {
       id: created.id,
+      patientId,
+      doctorId,
       patientName: apt.patientName,
       patientPhone: apt.patientPhone,
       doctorName: apt.doctorName,
       date: apt.date,
       time: apt.time,
       status: 'scheduled',
+      appointmentType: created.appointmentType || apt.appointmentType || 'routine_checkup',
+      durationMinutes: duration,
+      notes: created.notes || apt.notes,
     };
   },
 
   confirmAppointment: async (id: string): Promise<any> => {
     invalidateApiCache('getAppointments');
+    invalidateApiCache('getDashboardSummary');
     const res = await axiosClient.post(`/appointments/${id}/confirm`);
+    return res.data?.data?.appointment || res.data?.data || res.data;
+  },
+
+  checkInAppointment: async (id: string): Promise<any> => {
+    invalidateApiCache('getAppointments');
+    invalidateApiCache('getDashboardSummary');
+    const res = await axiosClient.post(`/appointments/${id}/check-in`);
+    return res.data?.data?.appointment || res.data?.data || res.data;
+  },
+
+  startAppointment: async (id: string): Promise<any> => {
+    invalidateApiCache('getAppointments');
+    invalidateApiCache('getDashboardSummary');
+    const res = await axiosClient.post(`/appointments/${id}/start`);
     return res.data?.data?.appointment || res.data?.data || res.data;
   },
 
   cancelAppointment: async (id: string, cancellationReason?: string): Promise<any> => {
     invalidateApiCache('getAppointments');
+    invalidateApiCache('getDashboardSummary');
     const res = await axiosClient.post(`/appointments/${id}/cancel`, { cancellationReason: cancellationReason || undefined });
     return res.data?.data?.appointment || res.data?.data || res.data;
   },
@@ -406,6 +434,7 @@ export const api = {
 
   completeAppointment: async (id: string): Promise<any> => {
     invalidateApiCache('getAppointments');
+    invalidateApiCache('getDashboardSummary');
     const res = await axiosClient.post(`/appointments/${id}/complete`);
     return res.data?.data?.appointment || res.data?.data || res.data;
   },
@@ -418,6 +447,12 @@ export const api = {
       });
     } else if (updates.status === 'confirmed' || updates.status === 'scheduled') {
       res = await axiosClient.post(`/appointments/${id}/confirm`);
+    } else if (updates.status === 'checked_in') {
+      res = await axiosClient.post(`/appointments/${id}/check-in`);
+    } else if (updates.status === 'in_progress') {
+      res = await axiosClient.post(`/appointments/${id}/start`);
+    } else if (updates.status === 'completed') {
+      res = await axiosClient.post(`/appointments/${id}/complete`);
     } else if (updates.date && updates.time) {
       const startTime = new Date(`${updates.date}T${updates.time}:00`);
       const endTime = new Date(startTime.getTime() + 30 * 60000);
@@ -608,6 +643,8 @@ export const api = {
   },
 
   updateDoctor: async (id: string, updates: Partial<ApiDoctor>): Promise<ApiDoctor> => {
+    invalidateApiCache('getDoctors');
+    invalidateApiCache('getDashboardSummary');
     const payload: any = {};
     if (updates.availability) {
       payload.status = updates.availability === 'available' ? 'active' : updates.availability;
@@ -625,45 +662,71 @@ export const api = {
 
   updateDoctorWorkingHours: async (id: string, workingHours: any[]): Promise<any> => {
     invalidateApiCache('getDoctors');
+    invalidateApiCache('getDashboardSummary');
     const normalized = (Array.isArray(workingHours) ? workingHours : []).map((h: any) => {
       const openTime = h.openTime || h.startTime || h.start || '09:00';
       const closeTime = h.closeTime || h.endTime || h.end || '17:00';
+      const breakStart = h.breakStart || '12:00';
+      const breakEnd = h.breakEnd || '13:00';
       return {
         dayOfWeek: typeof h.dayOfWeek === 'number' ? h.dayOfWeek : 0,
         openTime,
         closeTime,
         startTime: openTime,
         endTime: closeTime,
+        breakStart,
+        breakEnd,
         isClosed: Boolean(h.isClosed),
       };
     });
     const res = await axiosClient.put(`/doctors/${id}/working-hours`, { workingHours: normalized });
+    availabilityBus.publish({ doctorId: id });
     return res.data?.data || res.data;
   },
 
   // Prompt Engine Console
   getPrompts: async (): Promise<ApiPromptVersion[]> => {
-    const res = await axiosClient.get('/prompts/prompts');
-    const rawData = res.data?.data;
-    const list: any[] = Array.isArray(rawData?.prompts)
-      ? rawData.prompts
-      : Array.isArray(rawData)
-      ? rawData
-      : Array.isArray(res.data?.prompts)
-      ? res.data.prompts
-      : [];
+    const cacheKey = 'getPrompts';
+    const cached = getCachedData<ApiPromptVersion[]>(cacheKey);
+    if (cached) return cached;
 
-    return list.map((p: any) => ({
-      id: p.id,
-      version: p.version || 1,
-      content: p.content,
-      status: p.status || 'draft',
-      author: p.authorId || 'system',
-      createdAt: p.createdAt || new Date().toISOString(),
-    }));
+    if (inFlightRequests.has(cacheKey)) {
+      return inFlightRequests.get(cacheKey)!;
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const res = await axiosClient.get('/prompts/prompts');
+        const rawData = res.data?.data;
+        const list: any[] = Array.isArray(rawData?.prompts)
+          ? rawData.prompts
+          : Array.isArray(rawData)
+          ? rawData
+          : Array.isArray(res.data?.prompts)
+          ? res.data.prompts
+          : [];
+
+        const mapped = list.map((p: any) => ({
+          id: p.id,
+          version: p.version || 1,
+          content: p.content,
+          status: p.status || 'draft',
+          author: p.authorId || 'system',
+          createdAt: p.createdAt || new Date().toISOString(),
+        }));
+        setCachedData(cacheKey, mapped, 15000);
+        return mapped;
+      } finally {
+        inFlightRequests.delete(cacheKey);
+      }
+    })();
+
+    inFlightRequests.set(cacheKey, fetchPromise);
+    return fetchPromise;
   },
 
   createPromptVersion: async (content: string): Promise<ApiPromptVersion> => {
+    invalidateApiCache('getPrompts');
     const clinicsRes = await axiosClient.get('/clinics');
     const clinics = clinicsRes.data.data || clinicsRes.data || [];
     const clinicId = clinics.length > 0 ? clinics[0].id : undefined;
@@ -687,31 +750,54 @@ export const api = {
   },
 
   publishPromptVersion: async (id: string): Promise<void> => {
+    invalidateApiCache('getPrompts');
+    invalidateApiCache('getAiConfig');
     await axiosClient.post(`/prompts/prompts/${id}/publish`);
   },
 
   // Active AI Config Mapped to Multitenant Settings
   getAiConfig: async (): Promise<any> => {
-    const res = await axiosClient.get('/configurations');
-    const config = res.data.data?.configuration || res.data.data || res.data;
-    return {
-      model: config?.ai?.model || 'gpt-4o-realtime',
-      voice: config?.ai?.voice || 'alloy',
-      temperature: config?.ai?.temperature ?? 0.6,
-      maxDurationMs: config?.ai?.maxDurationMs ?? 900000,
-      inactivityTimeoutMs: config?.ai?.inactivityTimeoutMs ?? 30000,
-      interruptionThresholdDb: config?.ai?.interruptionThresholdDb ?? -45,
-      greeting: config?.ai?.greeting || 'Hello! Thank you for calling our dental office. How can I assist you today?',
-      tone: config?.ai?.tone || 'Professional',
-      bookingRules: config?.ai?.bookingRules || 'Only schedule appointments inside available slot periods.',
-      cancellationRules: config?.ai?.cancellationRules || 'Cancellations should be requested at least 24 hours in advance.',
-      emergencyRules: config?.ai?.emergencyRules || 'If a medical emergency is declared, advise the caller to hang up and dial 911.',
-      transferRules: config?.ai?.transferRules || 'Transfer complex billing calls or angry patients to the clinic staff.',
-      businessHoursRules: config?.ai?.businessHoursRules || 'Monday to Friday: 9:00 AM - 5:00 PM.',
-    };
+    const cacheKey = 'getAiConfig';
+    const cached = getCachedData<any>(cacheKey);
+    if (cached) return cached;
+
+    if (inFlightRequests.has(cacheKey)) {
+      return inFlightRequests.get(cacheKey)!;
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const res = await axiosClient.get('/configurations');
+        const config = res.data.data?.configuration || res.data.data || res.data;
+        const result = {
+          model: config?.ai?.model || 'gpt-4o-realtime',
+          voice: config?.ai?.voice || 'alloy',
+          temperature: config?.ai?.temperature ?? 0.6,
+          maxDurationMs: config?.ai?.maxDurationMs ?? 900000,
+          inactivityTimeoutMs: config?.ai?.inactivityTimeoutMs ?? 30000,
+          interruptionThresholdDb: config?.ai?.interruptionThresholdDb ?? -45,
+          greeting: config?.ai?.greeting || 'Hello! Thank you for calling our dental office. How can I assist you today?',
+          tone: config?.ai?.tone || 'Professional',
+          bookingRules: config?.ai?.bookingRules || 'Only schedule appointments inside available slot periods.',
+          cancellationRules: config?.ai?.cancellationRules || 'Cancellations should be requested at least 24 hours in advance.',
+          emergencyRules: config?.ai?.emergencyRules || 'If a medical emergency is declared, advise the caller to hang up and dial 911.',
+          transferRules: config?.ai?.transferRules || 'Transfer complex billing calls or angry patients to the clinic staff.',
+          businessHoursRules: config?.ai?.businessHoursRules || 'Monday to Friday: 9:00 AM - 5:00 PM.',
+        };
+        setCachedData(cacheKey, result, 15000);
+        return result;
+      } finally {
+        inFlightRequests.delete(cacheKey);
+      }
+    })();
+
+    inFlightRequests.set(cacheKey, fetchPromise);
+    return fetchPromise;
   },
 
   updateAiConfig: async (updates: any): Promise<any> => {
+    invalidateApiCache('getAiConfig');
+    invalidateApiCache('getClinicSettings');
     const promptString = `Greeting: ${updates.greeting}\nTone: ${updates.tone}\nBusiness Hours: ${updates.businessHoursRules}\nBooking: ${updates.bookingRules}\nCancellation: ${updates.cancellationRules}\nEmergency: ${updates.emergencyRules}\nTransfer: ${updates.transferRules}`;
     const payload = {
       ai: {
@@ -759,17 +845,37 @@ export const api = {
 
   // Multitenant Notification Settings
   getNotificationRules: async (): Promise<any> => {
-    const res = await axiosClient.get('/configurations');
-    const config = res.data.data?.configuration || res.data.data || res.data;
-    return {
-      smsEnabled: config?.notification?.smsEnabled ?? true,
-      emailEnabled: config?.notification?.emailEnabled ?? true,
-      timeBeforeHours: config?.notification?.timeBeforeHours ?? 24,
-      smsTemplate: config?.notification?.smsTemplate || 'Hi {{patientName}}, this is a reminder for your appointment on {{date}} at {{time}}.',
-    };
+    const cacheKey = 'getNotificationRules';
+    const cached = getCachedData<any>(cacheKey);
+    if (cached) return cached;
+
+    if (inFlightRequests.has(cacheKey)) {
+      return inFlightRequests.get(cacheKey)!;
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const res = await axiosClient.get('/configurations');
+        const config = res.data.data?.configuration || res.data.data || res.data;
+        const result = {
+          smsEnabled: config?.notification?.smsEnabled ?? true,
+          emailEnabled: config?.notification?.emailEnabled ?? true,
+          timeBeforeHours: config?.notification?.timeBeforeHours ?? 24,
+          smsTemplate: config?.notification?.smsTemplate || 'Hi {{patientName}}, this is a reminder for your appointment on {{date}} at {{time}}.',
+        };
+        setCachedData(cacheKey, result, 15000);
+        return result;
+      } finally {
+        inFlightRequests.delete(cacheKey);
+      }
+    })();
+
+    inFlightRequests.set(cacheKey, fetchPromise);
+    return fetchPromise;
   },
 
   updateNotificationRules: async (updates: any): Promise<any> => {
+    invalidateApiCache('getNotificationRules');
     const res = await axiosClient.patch('/configurations', {
       notification: updates
     });
@@ -784,68 +890,90 @@ export const api = {
 
   // Clinic Settings Mapped to Multitenant Configuration Business Settings
   getClinicSettings: async (): Promise<any> => {
-    const res = await axiosClient.get('/configurations');
-    const config = res.data.data?.configuration || res.data.data || res.data;
-    const biz = config?.business || {};
+    const cacheKey = 'getClinicSettings';
+    const cached = getCachedData<any>(cacheKey);
+    if (cached) return cached;
 
-    // --- Convert businessHoursSchedule (backend dayOfWeek format) → detailedSchedule (UI day-name format) ---
-    const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const canonicalHours: any[] = Array.isArray(biz.businessHoursSchedule)
-      ? biz.businessHoursSchedule
-      : Array.isArray(biz.businessHours) && (biz.businessHours as any[]).every((h: any) => typeof h === 'object')
-      ? biz.businessHours
-      : [];
-
-    let detailedSchedule: any[];
-    let workingDays: string[];
-
-    if (canonicalHours.length > 0) {
-      detailedSchedule = DAY_NAMES.map((dayName, idx) => {
-        const found = canonicalHours.find((h: any) => h.dayOfWeek === idx);
-        return {
-          day: dayName,
-          startTime: found?.openTime || found?.startTime || '09:00',
-          endTime: found?.closeTime || found?.endTime || '17:00',
-          isClosed: found ? Boolean(found.isClosed) : (idx === 0 || idx === 6),
-        };
-      });
-      workingDays = detailedSchedule.filter((d: any) => !d.isClosed).map((d: any) => d.day);
-    } else if (Array.isArray(biz.detailedSchedule) && biz.detailedSchedule.length > 0) {
-      // Use stored detailedSchedule as-is
-      detailedSchedule = biz.detailedSchedule;
-      workingDays = Array.isArray(biz.workingDays)
-        ? biz.workingDays
-        : detailedSchedule.filter((d: any) => !d.isClosed).map((d: any) => d.day);
-    } else {
-      // Default schedule: Mon–Fri open
-      detailedSchedule = DAY_NAMES.map((dayName, idx) => ({
-        day: dayName,
-        startTime: '09:00',
-        endTime: '17:00',
-        isClosed: idx === 0 || idx === 6,
-      }));
-      workingDays = biz.workingDays || ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+    if (inFlightRequests.has(cacheKey)) {
+      return inFlightRequests.get(cacheKey)!;
     }
 
-    return {
-      clinicName: biz.clinicName || config?.branding?.clinicName || 'Dental First Clinic',
-      contactPhone: biz.contactPhone || '+1 (800) 555-0199',
-      contactEmail: biz.contactEmail || 'office@dentalfirst.com',
-      address: biz.address || '123 Care Ave, Suite 100',
-      timezone: biz.timezone || config?.localization?.timezone || 'America/New_York',
-      appointmentDuration: biz.appointmentDuration ?? 30,
-      businessHours: biz.businessHoursLabel || biz.businessHours || '09:00 - 17:00',
-      workingDays,
-      detailedSchedule,
-      holidaySchedule: biz.holidaySchedule || 'Closed on national holidays',
-      aiGreeting: biz.aiGreeting || 'Hello, thank you for calling. How can I help you today?',
-      bookingRules: biz.bookingRules || 'Standard scheduling only.',
-      cancellationRules: biz.cancellationRules || '24-hour notice required.',
-      voiceSelection: config?.ai?.voice || 'alloy',
-    };
+    const fetchPromise = (async () => {
+      try {
+        const res = await axiosClient.get('/configurations');
+        const config = res.data.data?.configuration || res.data.data || res.data;
+        const biz = config?.business || {};
+
+        // --- Convert businessHoursSchedule (backend dayOfWeek format) → detailedSchedule (UI day-name format) ---
+        const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const canonicalHours: any[] = Array.isArray(biz.businessHoursSchedule)
+          ? biz.businessHoursSchedule
+          : Array.isArray(biz.businessHours) && (biz.businessHours as any[]).every((h: any) => typeof h === 'object')
+          ? biz.businessHours
+          : [];
+
+        let detailedSchedule: any[];
+        let workingDays: string[];
+
+        if (canonicalHours.length > 0) {
+          detailedSchedule = DAY_NAMES.map((dayName, idx) => {
+            const found = canonicalHours.find((h: any) => h.dayOfWeek === idx);
+            return {
+              day: dayName,
+              startTime: found?.openTime || found?.startTime || '09:00',
+              endTime: found?.closeTime || found?.endTime || '17:00',
+              isClosed: found ? Boolean(found.isClosed) : (idx === 0 || idx === 6),
+            };
+          });
+          workingDays = detailedSchedule.filter((d: any) => !d.isClosed).map((d: any) => d.day);
+        } else if (Array.isArray(biz.detailedSchedule) && biz.detailedSchedule.length > 0) {
+          // Use stored detailedSchedule as-is
+          detailedSchedule = biz.detailedSchedule;
+          workingDays = Array.isArray(biz.workingDays)
+            ? biz.workingDays
+            : detailedSchedule.filter((d: any) => !d.isClosed).map((d: any) => d.day);
+        } else {
+          // Default schedule: Mon–Fri open
+          detailedSchedule = DAY_NAMES.map((dayName, idx) => ({
+            day: dayName,
+            startTime: '09:00',
+            endTime: '17:00',
+            isClosed: idx === 0 || idx === 6,
+          }));
+          workingDays = biz.workingDays || ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+        }
+
+        const result = {
+          clinicName: biz.clinicName || config?.branding?.clinicName || 'Dental First Clinic',
+          contactPhone: biz.contactPhone || '+1 (800) 555-0199',
+          contactEmail: biz.contactEmail || 'office@dentalfirst.com',
+          address: biz.address || '123 Care Ave, Suite 100',
+          timezone: biz.timezone || config?.localization?.timezone || 'America/New_York',
+          appointmentDuration: biz.appointmentDuration ?? 30,
+          businessHours: biz.businessHoursLabel || biz.businessHours || '09:00 - 17:00',
+          workingDays,
+          detailedSchedule,
+          holidaySchedule: biz.holidaySchedule || 'Closed on national holidays',
+          aiGreeting: biz.aiGreeting || 'Hello, thank you for calling. How can I help you today?',
+          bookingRules: biz.bookingRules || 'Standard scheduling only.',
+          cancellationRules: biz.cancellationRules || '24-hour notice required.',
+          voiceSelection: config?.ai?.voice || 'alloy',
+        };
+
+        setCachedData(cacheKey, result, 15000);
+        return result;
+      } finally {
+        inFlightRequests.delete(cacheKey);
+      }
+    })();
+
+    inFlightRequests.set(cacheKey, fetchPromise);
+    return fetchPromise;
   },
 
   updateClinicSettings: async (updates: any): Promise<any> => {
+    invalidateApiCache('getClinicSettings');
+    invalidateApiCache('getAiConfig');
     // --- Convert detailedSchedule (UI day-name format) → businessHoursSchedule (backend dayOfWeek format) ---
     const DAY_NAME_TO_NUM: Record<string, number> = {
       Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6,
@@ -909,12 +1037,31 @@ export const api = {
 
   // Knowledge Base FAQs CRUD
   getFAQs: async (): Promise<any[]> => {
-    const res = await axiosClient.get('/faqs');
-    const list = res.data.data || res.data || [];
-    return list;
+    const cacheKey = 'getFAQs';
+    const cached = getCachedData<any[]>(cacheKey);
+    if (cached) return cached;
+
+    if (inFlightRequests.has(cacheKey)) {
+      return inFlightRequests.get(cacheKey)!;
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const res = await axiosClient.get('/faqs');
+        const list = res.data.data || res.data || [];
+        setCachedData(cacheKey, list, 15000);
+        return list;
+      } finally {
+        inFlightRequests.delete(cacheKey);
+      }
+    })();
+
+    inFlightRequests.set(cacheKey, fetchPromise);
+    return fetchPromise;
   },
 
   createFAQ: async (faq: { question: string; answer: string }): Promise<any> => {
+    invalidateApiCache('getFAQs');
     const res = await axiosClient.post('/faqs', faq);
     return res.data.data || res.data;
   },
@@ -949,8 +1096,27 @@ export const api = {
 
   // Historical and active conversations list
   getConversations: async (params?: any): Promise<any[]> => {
-    const res = await axiosClient.get('/conversations', { params });
-    return res.data.conversations || res.data.data?.conversations || res.data.data || res.data || [];
+    const cacheKey = `getConversations:${JSON.stringify(params || {})}`;
+    const cached = getCachedData<any[]>(cacheKey);
+    if (cached) return cached;
+
+    if (inFlightRequests.has(cacheKey)) {
+      return inFlightRequests.get(cacheKey)!;
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const res = await axiosClient.get('/conversations', { params });
+        const list = res.data.conversations || res.data.data?.conversations || res.data.data || res.data || [];
+        setCachedData(cacheKey, list, 10000);
+        return list;
+      } finally {
+        inFlightRequests.delete(cacheKey);
+      }
+    })();
+
+    inFlightRequests.set(cacheKey, fetchPromise);
+    return fetchPromise;
   },
 
   // System Audit Logs
@@ -975,7 +1141,7 @@ export const api = {
           result: l.outcome === 'granted' || l.outcome === 'success' ? 'SUCCESS' : 'FAILURE',
           correlationId: l.requestId || 'corr_unknown',
         }));
-        setCachedData(cacheKey, mapped);
+        setCachedData(cacheKey, mapped, 15000);
         return mapped;
       } catch {
         return [];
@@ -1017,72 +1183,152 @@ export const api = {
 
   // Users & RBAC Management
   getUsers: async (params?: { page?: number; limit?: number }): Promise<any[]> => {
-    const res = await axiosClient.get('/users', { params });
-    const list = res.data.data?.users || res.data.users || res.data.data || res.data || [];
-    return list.map((u: any) => ({
-      id: u.id,
-      email: u.email,
-      firstName: u.firstName || '',
-      lastName: u.lastName || '',
-      role: u.role,
-      status: u.status || 'active',
-      lastLoginAt: u.lastLoginAt,
-      createdAt: u.createdAt,
-    }));
+    const cacheKey = `getUsers:${params?.page || 1}:${params?.limit || 20}`;
+    const cached = getCachedData<any[]>(cacheKey);
+    if (cached) return cached;
+
+    if (inFlightRequests.has(cacheKey)) {
+      return inFlightRequests.get(cacheKey)!;
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const res = await axiosClient.get('/users', { params });
+        const list = res.data.data?.users || res.data.users || res.data.data || res.data || [];
+        const mapped = list.map((u: any) => ({
+          id: u.id,
+          email: u.email,
+          firstName: u.firstName || '',
+          lastName: u.lastName || '',
+          role: u.role,
+          status: u.status || 'active',
+          lastLoginAt: u.lastLoginAt,
+          createdAt: u.createdAt,
+        }));
+        setCachedData(cacheKey, mapped, 15000);
+        return mapped;
+      } finally {
+        inFlightRequests.delete(cacheKey);
+      }
+    })();
+
+    inFlightRequests.set(cacheKey, fetchPromise);
+    return fetchPromise;
   },
 
   updateUserRole: async (userId: string, role: string): Promise<any> => {
+    invalidateApiCache('getUsers');
     const res = await axiosClient.put(`/users/${userId}`, { role });
     return res.data.data || res.data;
   },
 
   suspendUser: async (userId: string): Promise<any> => {
+    invalidateApiCache('getUsers');
     const res = await axiosClient.post(`/users/${userId}/suspend`);
     return res.data.data || res.data;
   },
 
   reactivateUser: async (userId: string): Promise<any> => {
+    invalidateApiCache('getUsers');
     const res = await axiosClient.post(`/users/${userId}/reactivate`);
     return res.data.data || res.data;
   },
 
   forceLogoutUser: async (userId: string): Promise<any> => {
+    invalidateApiCache('getUsers');
     const res = await axiosClient.post(`/users/${userId}/force-logout`);
     return res.data.data || res.data;
   },
 
   transferOwnership: async (targetUserId: string): Promise<any> => {
+    invalidateApiCache('getUsers');
     const res = await axiosClient.post('/users/transfer-ownership', { targetUserId });
     return res.data.data || res.data;
   },
 
-  deleteUser: async (userId: string): Promise<any> => {
-    const res = await axiosClient.delete(`/users/${userId}`);
+  deleteUser: async (userId: string, reason?: string): Promise<any> => {
+    invalidateApiCache('getUsers');
+    const res = await axiosClient.delete(`/users/${userId}`, { data: { reason } });
+    return res.data.data || res.data;
+  },
+
+  revokeUser: async (userId: string, reason: string): Promise<any> => {
+    invalidateApiCache('getUsers');
+    const res = await axiosClient.post(`/users/${userId}/revoke`, { reason });
     return res.data.data || res.data;
   },
 
   // Invitation Management
   getInvitations: async (params?: { page?: number; limit?: number; status?: string }): Promise<any[]> => {
-    const res = await axiosClient.get('/invitations', { params });
-    return res.data.data?.invitations || res.data.data || res.data || [];
+    const cacheKey = `getInvitations:${params?.status || 'all'}:${params?.page || 1}:${params?.limit || 20}`;
+    const cached = getCachedData<any[]>(cacheKey);
+    if (cached) return cached;
+
+    if (inFlightRequests.has(cacheKey)) {
+      return inFlightRequests.get(cacheKey)!;
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const res = await axiosClient.get('/invitations', { params });
+        const list = res.data.data?.invitations || res.data.data || res.data || [];
+        setCachedData(cacheKey, list, 15000);
+        return list;
+      } finally {
+        inFlightRequests.delete(cacheKey);
+      }
+    })();
+
+    inFlightRequests.set(cacheKey, fetchPromise);
+    return fetchPromise;
   },
 
   getInvitationStats: async (): Promise<any> => {
-    const res = await axiosClient.get('/invitations/stats');
-    return res.data.data || res.data;
+    const cacheKey = 'getInvitationStats';
+    const cached = getCachedData<any>(cacheKey);
+    if (cached) return cached;
+
+    if (inFlightRequests.has(cacheKey)) {
+      return inFlightRequests.get(cacheKey)!;
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const res = await axiosClient.get('/invitations/stats');
+        const result = res.data.data || res.data;
+        setCachedData(cacheKey, result, 15000);
+        return result;
+      } finally {
+        inFlightRequests.delete(cacheKey);
+      }
+    })();
+
+    inFlightRequests.set(cacheKey, fetchPromise);
+    return fetchPromise;
   },
 
   createInvitation: async (email: string, roleName: string): Promise<any> => {
+    invalidateApiCache('getInvitations');
+    invalidateApiCache('getInvitationStats');
     const res = await axiosClient.post('/invitations', { email, roleName });
     return res.data.data || res.data;
   },
 
-  resendInvitation: async (invitationId: string): Promise<any> => {
-    const res = await axiosClient.post(`/invitations/${invitationId}/resend`);
+  resendInvitation: async (invitationId: string, idempotencyKey?: string): Promise<any> => {
+    invalidateApiCache('getInvitations');
+    invalidateApiCache('getInvitationStats');
+    const key = idempotencyKey || `resend_${invitationId}_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const res = await axiosClient.post(`/invitations/${invitationId}/resend`, {}, {
+      headers: {
+        'Idempotency-Key': key,
+      },
+    });
     return res.data.data || res.data;
   },
 
   revokeInvitation: async (invitationId: string): Promise<any> => {
+    invalidateApiCache('getInvitations');
+    invalidateApiCache('getInvitationStats');
     const res = await axiosClient.delete(`/invitations/${invitationId}`);
     return res.data.data || res.data;
   },
@@ -1093,12 +1339,18 @@ export const api = {
   },
 
   acceptInvitation: async (payload: { token: string; password?: string; firstName?: string; lastName?: string }): Promise<any> => {
+    invalidateApiCache('getInvitations');
+    invalidateApiCache('getInvitationStats');
+    invalidateApiCache('getUsers');
     const res = await axiosClient.post('/invitations/accept', payload);
     return res.data.data || res.data;
   },
 
-  declineInvitation: async (token: string): Promise<any> => {
-    const res = await axiosClient.post('/invitations/decline', { token });
+  declineInvitation: async (payloadOrToken: string | { token: string; reason?: string }): Promise<any> => {
+    invalidateApiCache('getInvitations');
+    invalidateApiCache('getInvitationStats');
+    const payload = typeof payloadOrToken === 'string' ? { token: payloadOrToken } : payloadOrToken;
+    const res = await axiosClient.post('/invitations/decline', payload);
     return res.data.data || res.data;
   },
 

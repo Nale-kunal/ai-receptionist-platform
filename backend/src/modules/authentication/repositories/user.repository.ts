@@ -12,6 +12,7 @@
 
 import type { PrismaClient, User, Prisma } from '@prisma/client';
 import { withDbRetry } from '../../../shared/database/dbRetry';
+import { normalizeEmail } from '../../../shared/utils/email.utils';
 
 // --------------------------------------------------------------------------
 // Types
@@ -43,6 +44,9 @@ export interface UpdateUserData {
   updatedBy?: string;
   clinicId?: string | null;
   deletedAt?: Date | null;
+  revokedAt?: Date | null;
+  revokedByUserId?: string | null;
+  revocationReason?: string | null;
 }
 
 export interface UserWithoutSensitiveFields
@@ -59,7 +63,7 @@ export class UserRepository {
     return withDbRetry(() =>
       this.prisma.user.create({
         data: {
-          email: data.email,
+          email: normalizeEmail(data.email),
           passwordHash: data.passwordHash,
           firstName: data.firstName,
           lastName: data.lastName,
@@ -101,7 +105,7 @@ export class UserRepository {
     return withDbRetry(() =>
       this.prisma.user.findFirst({
         where: {
-          email: email.toLowerCase().trim(),
+          email: normalizeEmail(email),
           deletedAt: null,
         },
       }),
@@ -112,7 +116,7 @@ export class UserRepository {
     return withDbRetry(() =>
       this.prisma.user.findFirst({
         where: {
-          email: email.toLowerCase().trim(),
+          email: normalizeEmail(email),
           tenantId,
           deletedAt: null,
         },
@@ -124,7 +128,7 @@ export class UserRepository {
     const count = await withDbRetry(() =>
       this.prisma.user.count({
         where: {
-          email: email.toLowerCase().trim(),
+          email: normalizeEmail(email),
           deletedAt: null,
         },
       }),
@@ -133,6 +137,7 @@ export class UserRepository {
   }
 
   async update(id: string, data: UpdateUserData): Promise<User> {
+    UserRepository.invalidateRelationCache(id);
     return this.prisma.user.update({
       where: { id },
       data: {
@@ -164,6 +169,7 @@ export class UserRepository {
   }
 
   async incrementTokenVersion(id: string): Promise<User> {
+    UserRepository.invalidateRelationCache(id);
     return this.prisma.user.update({
       where: { id },
       data: {
@@ -177,7 +183,24 @@ export class UserRepository {
     return this.prisma.user.count({ where: { ...where, deletedAt: null } });
   }
 
+  private static userRelationCache = new Map<string, { user: any; expiresAt: number }>();
+  private static readonly RELATION_TTL_MS = 15000;
+
+  public static invalidateRelationCache(userId?: string): void {
+    if (userId) {
+      UserRepository.userRelationCache.delete(userId);
+    } else {
+      UserRepository.userRelationCache.clear();
+    }
+  }
+
   async findByIdWithRelations(id: string): Promise<any | null> {
+    const now = Date.now();
+    const cached = UserRepository.userRelationCache.get(id);
+    if (cached && cached.expiresAt > now) {
+      return cached.user;
+    }
+
     const user = await this.prisma.user.findFirst({
       where: {
         id,
@@ -197,6 +220,13 @@ export class UserRepository {
       if (primaryClinic) {
         (user as any).clinic = primaryClinic;
       }
+    }
+
+    if (user) {
+      UserRepository.userRelationCache.set(id, {
+        user,
+        expiresAt: now + UserRepository.RELATION_TTL_MS,
+      });
     }
 
     return user;

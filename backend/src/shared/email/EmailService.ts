@@ -3,6 +3,7 @@ import type { IEmailProvider } from './interfaces/IEmailProvider';
 import { InvitationEmailTemplate } from './templates/InvitationEmailTemplate';
 import { PasswordResetTemplate } from './templates/PasswordResetTemplate';
 import { EmailVerificationTemplate } from './templates/EmailVerificationTemplate';
+import { AccessRevokedEmailTemplate } from './templates/AccessRevokedEmailTemplate';
 import { appConfig, formatSenderAddress } from '../../config/app-config.service';
 
 export interface SendInvitationEmailParams {
@@ -206,11 +207,64 @@ export class EmailService {
     });
   }
 
+  public async sendAccessRevokedEmail(params: {
+    idempotencyKey?: string;
+    to: string;
+    recipientName?: string;
+    roleName: string;
+    tenantName: string;
+    clinicName?: string;
+    revokerName: string;
+    revokedAt: Date;
+    reason: string;
+    tenantId?: string;
+    clinicId?: string;
+    timezone?: string;
+  }): Promise<void> {
+    const rendered = AccessRevokedEmailTemplate.render({
+      toEmail: params.to,
+      recipientName: params.recipientName,
+      roleName: params.roleName,
+      tenantName: params.clinicName || params.tenantName,
+      revokerName: params.revokerName,
+      revokedAt: params.revokedAt,
+      reason: params.reason,
+      timezone: params.timezone,
+    });
+
+    await this.mailQueue.enqueue({
+      idempotencyKey: params.idempotencyKey,
+      tenantId: params.tenantId,
+      clinicId: params.clinicId,
+      recipient: params.to,
+      from: this.getSenderAddress(),
+      type: 'notification',
+      subject: rendered.subject,
+      html: rendered.html,
+      text: rendered.text,
+    });
+  }
+
   public async sendMembershipRemovedEmail(params: {
     to: string;
     tenantName: string;
     tenantId?: string;
+    roleName?: string;
+    revokerName?: string;
+    reason?: string;
   }): Promise<void> {
+    if (params.reason) {
+      await this.sendAccessRevokedEmail({
+        to: params.to,
+        roleName: params.roleName || 'Staff',
+        tenantName: params.tenantName,
+        revokerName: params.revokerName || 'Practice Administrator',
+        revokedAt: new Date(),
+        reason: params.reason,
+        tenantId: params.tenantId,
+      });
+      return;
+    }
     const subject = `Practice membership update for ${params.tenantName}`;
     const text = `Hello,\n\nYour access membership to ${params.tenantName} has been removed.\n\nBest regards,\nDental AI Platform`;
     const html = `<div style="font-family: sans-serif; padding: 24px; background: #f8fafc;">

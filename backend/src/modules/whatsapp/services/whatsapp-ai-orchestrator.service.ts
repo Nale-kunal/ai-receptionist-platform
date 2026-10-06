@@ -641,9 +641,8 @@ IMPORTANT:
   private getNextBusinessDate(): string {
     const d = new Date();
     d.setDate(d.getDate() + 1);
-    // Skip weekend
+    // If tomorrow is Sunday, skip to Monday
     if (d.getDay() === 0) d.setDate(d.getDate() + 1);
-    if (d.getDay() === 6) d.setDate(d.getDate() + 2);
     return d.toISOString().split('T')[0]!;
   }
 

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WhatsApp Module Interfaces
  *
  * All shared types, DTOs, and service contracts for the WhatsApp channel.
@@ -75,6 +75,7 @@ export interface SafeWhatsAppIntegration {
   displayName: string;
   status: string;
   isEnabled: boolean;
+  wabaSubscribed?: boolean;
   settings: WhatsAppIntegrationSettings;
   createdAt: Date;
   updatedAt: Date;
@@ -187,7 +188,7 @@ export interface CreateWhatsAppIntegrationParams {
   phoneNumberId: string;
   wabaId: string;
   displayName: string;
-  webhookVerifyToken: string;
+  webhookVerifyToken?: string;
   settings?: Partial<WhatsAppIntegrationSettings>;
   actorId: string;
   requestId: string;

@@ -37,6 +37,7 @@ import {
   EMAIL_VERIFICATION_TOKEN_TTL_SECONDS,
   PASSWORD_RESET_TOKEN_TTL_SECONDS,
 } from '../constants/auth.constants';
+import { SYSTEM_ROLE_PERMISSIONS_MAP } from '../../rbac/constants/rbac.constants';
 
 import {
   EmailAlreadyRegisteredError,
@@ -93,13 +94,16 @@ export interface AuthEmailProvider {
   sendPasswordReset(params: { to: string; token: string; userId: string }): Promise<void>;
   sendInvitationEmail?(params: {
     to: string;
-    token: string;
+    type?: string;
+    currentRoleName?: string;
+    token?: string;
     roleName: string;
     tenantName: string;
     inviteLink: string;
     inviterName: string;
     tenantId?: string;
     clinicId?: string;
+    idempotencyKey?: string;
   }): Promise<void>;
 }
 
@@ -366,9 +370,10 @@ export class AuthService implements IAuthService {
     });
 
     const getRolePermissions = (role: string): string[] => {
-      if (role === 'super_admin' || role === 'clinic_owner') return ['*'];
-      if (role === 'doctor') return ['clinic:read', 'appointment:read', 'appointment:write', 'patient:read', 'patient:write', 'conversation:read', 'settings:read'];
-      return ['clinic:read', 'appointment:read', 'appointment:write', 'patient:read', 'patient:write', 'conversation:read'];
+      if (role === 'super_admin' || role === 'clinic_owner' || role === 'admin' || role === 'tenant_owner') return ['*'];
+      const perms = SYSTEM_ROLE_PERMISSIONS_MAP[role];
+      if (perms) return Array.from(perms);
+      return [];
     };
 
     const userWithRelations = this.userRepository.findByIdWithRelations

@@ -39,7 +39,27 @@ function sendValidationError(res: Response, error: ZodError, requestId: string):
   });
 }
 
+interface CachedClinics {
+  payload: any;
+  expiresAt: number;
+}
+
 export class ClinicController {
+  private static clinicCache = new Map<string, CachedClinics>();
+  private static readonly TTL_MS = 30000; // 30-second cache
+
+  public static invalidateCache(tenantId?: string): void {
+    if (tenantId) {
+      for (const key of ClinicController.clinicCache.keys()) {
+        if (key.startsWith(tenantId)) {
+          ClinicController.clinicCache.delete(key);
+        }
+      }
+    } else {
+      ClinicController.clinicCache.clear();
+    }
+  }
+
   constructor(private readonly clinicService: IClinicService) {}
 
   public createClinic = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -64,6 +84,7 @@ export class ClinicController {
         requestId,
       });
 
+      ClinicController.invalidateCache(tenantId);
       sendSuccess(res, { clinic }, 201);
     } catch (err) {
       next(err);
@@ -95,6 +116,7 @@ export class ClinicController {
         requestId,
       });
 
+      ClinicController.invalidateCache(tenantId);
       sendSuccess(res, { clinic });
     } catch (err) {
       next(err);
@@ -142,6 +164,18 @@ export class ClinicController {
       const limit = req.query['limit'] ? parseInt(req.query['limit'] as string, 10) : undefined;
       const offset = req.query['offset'] ? parseInt(req.query['offset'] as string, 10) : undefined;
 
+      const cacheKey = `${tenantId}:${status || 'all'}:${limit || 'none'}:${offset || 'none'}`;
+      const now = Date.now();
+      const cached = ClinicController.clinicCache.get(cacheKey);
+      if (cached && cached.expiresAt > now) {
+        if (typeof res.setHeader === 'function') {
+          res.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate');
+          res.setHeader('Server-Timing', 'cache;desc="HIT"');
+        }
+        sendSuccess(res, cached.payload);
+        return;
+      }
+
       const clinics = await this.clinicService.listClinics({
         tenantId,
         status,
@@ -149,7 +183,16 @@ export class ClinicController {
         offset,
       });
 
-      sendSuccess(res, { clinics, total: clinics.length });
+      const payload = { clinics, total: clinics.length };
+      ClinicController.clinicCache.set(cacheKey, {
+        payload,
+        expiresAt: now + ClinicController.TTL_MS,
+      });
+
+      if (typeof res.setHeader === 'function') {
+        res.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate');
+      }
+      sendSuccess(res, payload);
     } catch (err) {
       next(err);
     }
@@ -180,6 +223,7 @@ export class ClinicController {
         requestId,
       );
 
+      ClinicController.invalidateCache(tenantId);
       sendSuccess(res, { clinic });
     } catch (err) {
       next(err);
@@ -211,6 +255,7 @@ export class ClinicController {
         requestId,
       );
 
+      ClinicController.invalidateCache(tenantId);
       sendSuccess(res, { clinic });
     } catch (err) {
       next(err);
@@ -229,6 +274,7 @@ export class ClinicController {
       const actorId = req.user?.userId ?? 'system';
 
       await this.clinicService.softDeleteClinic(id, tenantId, actorId, requestId);
+      ClinicController.invalidateCache(tenantId);
       sendSuccess(res, { deleted: true });
     } catch (err) {
       next(err);
@@ -247,6 +293,7 @@ export class ClinicController {
       const actorId = req.user?.userId ?? 'system';
 
       const clinic = await this.clinicService.restoreClinic(id, tenantId, actorId, requestId);
+      ClinicController.invalidateCache(tenantId);
       sendSuccess(res, { clinic });
     } catch (err) {
       next(err);

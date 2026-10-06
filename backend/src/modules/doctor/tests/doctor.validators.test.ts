@@ -68,10 +68,10 @@ describe('Doctor Validators', () => {
   });
 
   describe('DoctorWorkingHoursListSchema', () => {
-    it('should validate correct hours format', () => {
+    it('should validate correct hours and break format', () => {
       const parsed = DoctorWorkingHoursListSchema.safeParse({
         workingHours: [
-          { dayOfWeek: 1, openTime: '09:00', closeTime: '17:00', isClosed: false },
+          { dayOfWeek: 1, openTime: '09:00', closeTime: '17:00', breakStart: '12:00', breakEnd: '13:00', isClosed: false },
         ],
       });
       expect(parsed.success).toBe(true);
@@ -81,6 +81,42 @@ describe('Doctor Validators', () => {
       const parsed = DoctorWorkingHoursListSchema.safeParse({
         workingHours: [
           { dayOfWeek: 1, openTime: '17:00', closeTime: '09:00', isClosed: false },
+        ],
+      });
+      expect(parsed.success).toBe(false);
+    });
+
+    it('should fail if breakEnd is before breakStart', () => {
+      const parsed = DoctorWorkingHoursListSchema.safeParse({
+        workingHours: [
+          { dayOfWeek: 1, openTime: '09:00', closeTime: '17:00', breakStart: '13:00', breakEnd: '12:00', isClosed: false },
+        ],
+      });
+      expect(parsed.success).toBe(false);
+    });
+
+    it('should fail if break falls after closing time (18:00 - 19:00 vs close 17:00)', () => {
+      const parsed = DoctorWorkingHoursListSchema.safeParse({
+        workingHours: [
+          { dayOfWeek: 1, openTime: '09:00', closeTime: '17:00', breakStart: '18:00', breakEnd: '19:00', isClosed: false },
+        ],
+      });
+      expect(parsed.success).toBe(false);
+    });
+
+    it('should fail if break starts before opening time (08:00 - 10:00 vs open 09:00)', () => {
+      const parsed = DoctorWorkingHoursListSchema.safeParse({
+        workingHours: [
+          { dayOfWeek: 1, openTime: '09:00', closeTime: '17:00', breakStart: '08:00', breakEnd: '10:00', isClosed: false },
+        ],
+      });
+      expect(parsed.success).toBe(false);
+    });
+
+    it('should fail if break extends beyond closing time (16:30 - 18:00 vs close 17:00)', () => {
+      const parsed = DoctorWorkingHoursListSchema.safeParse({
+        workingHours: [
+          { dayOfWeek: 1, openTime: '09:00', closeTime: '17:00', breakStart: '16:30', breakEnd: '18:00', isClosed: false },
         ],
       });
       expect(parsed.success).toBe(false);

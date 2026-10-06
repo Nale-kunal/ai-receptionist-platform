@@ -28,11 +28,56 @@ export class AppointmentNotFoundError extends AppointmentError {
 }
 
 export class AppointmentConflictError extends AppointmentError {
-  constructor() {
+  constructor(message?: string, details?: Record<string, unknown>) {
     super(
-      'The requested time slot is already booked for this doctor.',
+      message || 'The requested time slot is already booked for this doctor.',
       'APPOINTMENT_CONFLICT',
       409,
+      details,
+    );
+  }
+}
+
+export class DoctorBreakConflictError extends AppointmentError {
+  constructor(message?: string, details?: Record<string, unknown>) {
+    super(
+      message || 'The selected appointment overlaps practitioner lunch or break period.',
+      'DOCTOR_BREAK_CONFLICT',
+      422,
+      details,
+    );
+  }
+}
+
+export class DoctorScheduleClosedError extends AppointmentError {
+  constructor(message?: string, details?: Record<string, unknown>) {
+    super(
+      message || 'The practitioner is closed or off on the requested day.',
+      'DOCTOR_SCHEDULE_CLOSED',
+      422,
+      details,
+    );
+  }
+}
+
+export class AppointmentOutsideWorkingHoursError extends AppointmentError {
+  constructor(message?: string, details?: Record<string, unknown>) {
+    super(
+      message || 'The requested appointment time is outside practitioner working hours.',
+      'APPOINTMENT_OUTSIDE_WORKING_HOURS',
+      422,
+      details,
+    );
+  }
+}
+
+export class DoctorOnLeaveError extends AppointmentError {
+  constructor(message?: string, details?: Record<string, unknown>) {
+    super(
+      message || 'The practitioner is on leave during the requested date.',
+      'DOCTOR_ON_LEAVE',
+      422,
+      details,
     );
   }
 }
@@ -68,11 +113,12 @@ export class AppointmentAlreadyTerminalError extends AppointmentError {
 }
 
 export class DoctorNotAvailableError extends AppointmentError {
-  constructor(message?: string) {
+  constructor(message?: string, details?: Record<string, unknown>) {
     super(
       message || 'The selected doctor is not active and cannot accept appointments.',
       'DOCTOR_NOT_AVAILABLE',
       422,
+      details,
     );
   }
 }

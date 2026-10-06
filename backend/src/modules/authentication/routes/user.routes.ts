@@ -42,6 +42,7 @@ export function createUserRouter(deps: UserRouterDeps): Router {
   router.patch('/:id',           authenticate, resolveTenant, requireUpdate,  controller.update);
   router.put('/:id',             authenticate, resolveTenant, requireUpdate,  controller.update);
   router.delete('/:id',          authenticate, resolveTenant, requireDelete,  controller.delete);
+  router.post('/:id/revoke',     authenticate, resolveTenant, requireDelete,  controller.revoke);
   router.post('/:id/restore',    authenticate, resolveTenant, requireUpdate,  controller.restore);
 
   // ── Lifecycle management actions ──

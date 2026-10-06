@@ -7,6 +7,7 @@ import {
   ARGON2_TIME_COST,
 } from '../constants/auth.constants';
 import { isValidCustomerRole } from '../../rbac/constants/role-config.constants';
+import { normalizeEmail } from '../../../shared/utils/email.utils';
 import {
   InvitationAlreadyMemberError,
   InvitationAlreadyRegisteredError,
@@ -17,6 +18,9 @@ import {
   InvitationInvalidTokenError,
   InvitationInvalidRoleError,
   InvitationActorInactiveError,
+  InvitationNotFoundError,
+  InvitationNotResendableError,
+  InvitationEmailMismatchError,
 } from '../errors/auth.errors';
 
 // ---------------------------------------------------------------------------
@@ -37,7 +41,10 @@ export interface AcceptInvitationParams {
   password?: string;
   firstName?: string;
   lastName?: string;
+  actorUserId?: string;
+  actorEmail?: string;
 }
+
 
 export interface ListInvitationsParams {
   tenantId: string;
@@ -88,7 +95,7 @@ export class InvitationService {
    */
   public async createInvitation(params: CreateInvitationParams) {
     const { tenantId, invitedByUserId, email, roleName } = params;
-    const normalizedEmail = email.toLowerCase().trim();
+    const normalizedEmail = normalizeEmail(email);
 
     // 1. Validate role is strictly one of the 3 customer roles
     if (!isValidCustomerRole(roleName)) {
@@ -142,24 +149,33 @@ export class InvitationService {
     // Token expires in 7 days
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-    // 6. Store invitation in database
-    const invitation = await this.prisma.invitation.create({
-      data: {
-        tenantId,
-        email: normalizedEmail,
-        type,
-        currentRoleName,
-        roleName,
-        tokenHash,
-        invitedByUserId,
-        status: 'pending',
-        expiresAt,
-      },
-      include: {
-        tenant: true,
-        invitedBy: { select: { firstName: true, lastName: true } },
-      },
-    });
+    // 6. Store invitation in database with concurrency safety
+    let invitation;
+    try {
+      invitation = await this.prisma.invitation.create({
+        data: {
+          tenantId,
+          email: normalizedEmail,
+          type,
+          currentRoleName,
+          roleName,
+          tokenHash,
+          invitedByUserId,
+          status: 'pending',
+          expiresAt,
+        },
+        include: {
+          tenant: true,
+          invitedBy: { select: { firstName: true, lastName: true } },
+        },
+      });
+    } catch (err: any) {
+      // Catch PostgreSQL P2002 unique constraint violation on (tenantId, email) for active invitations
+      if (err?.code === 'P2002') {
+        throw new InvitationPendingExistsError(normalizedEmail);
+      }
+      throw err;
+    }
 
     const inviteLink = this.buildInviteLink(rawToken, type);
 
@@ -228,6 +244,7 @@ export class InvitationService {
     id: string,
     tenantId: string,
     actorUserId: string,
+    clientKey?: string,
   ) {
     const invitation = await this.prisma.invitation.findFirst({
       where: { id, tenantId },
@@ -238,13 +255,11 @@ export class InvitationService {
     });
 
     if (!invitation) {
-      throw new Error('Invitation not found.');
+      throw new InvitationNotFoundError(id);
     }
 
     if (invitation.status !== 'pending' && invitation.status !== 'viewed' && invitation.status !== 'expired') {
-      throw new Error(
-        `Cannot resend invitation with status '${invitation.status}'. Only pending, viewed or expired invitations can be resent.`,
-      );
+      throw new InvitationNotResendableError(invitation.status);
     }
 
     // Generate fresh token
@@ -277,9 +292,14 @@ export class InvitationService {
       }).catch(() => {});
     }
 
+    const mailIdempotencyKey = clientKey
+      ? `invitation_resend:${invitation.id}:${clientKey}`
+      : `invitation_resend:${invitation.id}:${tokenHash}`;
+
     if (this.emailProvider && typeof this.emailProvider.sendInvitationEmail === 'function') {
       try {
         await this.emailProvider.sendInvitationEmail({
+          idempotencyKey: mailIdempotencyKey,
           to: invitation.email,
           tenantId,
           type: invitation.type,
@@ -356,32 +376,61 @@ export class InvitationService {
       }).catch(() => {});
     }
 
+    const normalizedEmail = normalizeEmail(invitation.email);
     const existingUser = await this.prisma.user.findFirst({
-      where: { email: invitation.email.toLowerCase().trim(), deletedAt: null },
+      where: {
+        email: { equals: normalizedEmail, mode: 'insensitive' },
+      },
     });
 
     const inviterName = invitation.invitedBy
       ? `${(invitation.invitedBy as any).firstName} ${(invitation.invitedBy as any).lastName}`.trim()
       : 'A team member';
 
+    const roleDisplayName =
+      invitation.roleName === 'clinic_owner'
+        ? 'Practice Owner'
+        : invitation.roleName === 'doctor'
+        ? 'Dentist'
+        : invitation.roleName === 'receptionist'
+        ? 'Receptionist'
+        : invitation.roleName;
+
+    const isActiveAccount = Boolean(
+      existingUser && existingUser.deletedAt === null && existingUser.status === 'active',
+    );
+    const isExistingUser = Boolean(existingUser);
+    const nextAction: 'SIGN_IN' | 'SIGN_UP' = isActiveAccount ? 'SIGN_IN' : 'SIGN_UP';
+
     return {
+      valid: true,
       id: invitation.id,
       tenantId: invitation.tenantId,
-      tenantName: invitation.tenant.name,
+      tenantName: invitation.tenant?.name || 'Practice',
+      clinicName: invitation.tenant?.name || 'Practice',
       email: invitation.email,
-      type: invitation.type,
-      currentRoleName: invitation.currentRoleName,
       roleName: invitation.roleName,
+      role: roleDisplayName,
+      currentRoleName: invitation.currentRoleName,
+      type: invitation.type,
       expiresAt: invitation.expiresAt,
+      status: invitation.status,
       inviterName,
-      isExistingUser: Boolean(existingUser),
+      invitedByName: inviterName,
+      invitedEmail: invitation.email,
+      isExistingUser,
+      account: {
+        exists: isActiveAccount,
+        status: existingUser?.status ?? null,
+      },
+      nextAction,
     };
   }
 
   /**
-   * Decline an invitation explicitly.
+   * Decline an invitation explicitly with an optional decline reason.
    */
-  public async declineInvitation(rawToken: string, actorUserId?: string) {
+  public async declineInvitation(rawToken: string, actorUserId?: string, reason?: string) {
     if (!rawToken) {
       throw new InvitationInvalidTokenError('Invitation token is required.');
     }
@@ -400,11 +449,14 @@ export class InvitationService {
       throw new Error(`Invitation cannot be declined. Current status: ${invitation.status}.`);
     }
 
+    const sanitizedReason = typeof reason === 'string' && reason.trim().length > 0 ? reason.trim() : null;
+
     const updated = await this.prisma.invitation.update({
       where: { id: invitation.id },
       data: {
         status: 'declined',
         declinedAt: new Date(),
+        declineReason: sanitizedReason,
       },
     });
 
@@ -416,7 +468,11 @@ export class InvitationService {
         tenantId: invitation.tenantId,
         userId: actorUserId || 'guest',
         ipAddress: 'system',
-        metadata: { invitationId: invitation.id, roleName: invitation.roleName },
+        metadata: {
+          invitationId: invitation.id,
+          roleName: invitation.roleName,
+          reason: sanitizedReason,
+        },
       }).catch(() => {});
     }
 
@@ -425,16 +481,19 @@ export class InvitationService {
 
   /**
    * Accept invitation and atomically create user or update role + assign RBAC.
+   * Runs in an atomic PostgreSQL transaction with 0 root-Prisma calls inside tx.
    */
   public async acceptInvitation(params: AcceptInvitationParams) {
-    const { token, password, firstName, lastName } = params;
+    const { token, password, firstName, lastName, actorUserId: _actorUserId, actorEmail } = params;
 
     if (!token) {
       throw new InvitationInvalidTokenError('Invitation token is required.');
     }
 
+    const startTime = Date.now();
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
+    // Compute Argon2id password hash BEFORE opening database transaction
     let passwordHash: string | undefined;
     if (password) {
       passwordHash = await argon2.hash(password, {
@@ -445,115 +504,205 @@ export class InvitationService {
       });
     }
 
-    return await this.prisma.$transaction(async (tx) => {
-      const invitation = await tx.invitation.findUnique({
-        where: { tokenHash },
-        include: { tenant: true, invitedBy: true },
-      });
+    console.info(`[InvitationService] invitation.accept.started [tokenHash=${tokenHash.substring(0, 10)}...]`);
 
-      if (!invitation) {
-        throw new InvitationInvalidTokenError('Invalid invitation token.');
-      }
-      if (invitation.status === 'revoked') {
-        throw new InvitationRevokedError();
-      }
-      if (invitation.status === 'accepted') {
-        throw new InvitationAlreadyAcceptedError();
-      }
-      if (invitation.status === 'declined') {
-        throw new InvitationInvalidTokenError('This invitation has already been declined.');
-      }
-      if (invitation.status !== 'pending' && invitation.status !== 'viewed') {
-        throw new InvitationInvalidTokenError(`Invitation cannot be accepted. Current status: ${invitation.status}.`);
-      }
-      if (invitation.expiresAt < new Date()) {
-        await tx.invitation.update({
-          where: { id: invitation.id },
-          data: { status: 'expired' },
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        const txStartTime = Date.now();
+
+        const invitation = await tx.invitation.findUnique({
+          where: { tokenHash },
+          include: { tenant: true, invitedBy: true },
         });
-        throw new InvitationExpiredError();
-      }
-      if (!invitation.tenant || invitation.tenant.status === 'suspended') {
-        throw new Error('Practice tenant is inactive or suspended.');
-      }
 
-      const existingUser = await tx.user.findFirst({
-        where: { email: invitation.email.toLowerCase().trim(), deletedAt: null },
-      });
+        if (!invitation) {
+          throw new InvitationInvalidTokenError('Invalid invitation token.');
+        }
+        if (invitation.status === 'revoked') {
+          throw new InvitationRevokedError();
+        }
+        if (invitation.status === 'accepted') {
+          throw new InvitationAlreadyAcceptedError();
+        }
+        if (invitation.status === 'declined') {
+          throw new InvitationInvalidTokenError('This invitation has already been declined.');
+        }
+        if (invitation.status !== 'pending' && invitation.status !== 'viewed') {
+          throw new InvitationInvalidTokenError(`Invitation cannot be accepted. Current status: ${invitation.status}.`);
+        }
+        if (invitation.expiresAt < new Date()) {
+          await tx.invitation.update({
+            where: { id: invitation.id },
+            data: { status: 'expired' },
+          });
+          throw new InvitationExpiredError();
+        }
+        if (!invitation.tenant || invitation.tenant.status === 'suspended') {
+          throw new Error('Practice tenant is inactive or suspended.');
+        }
 
-      // Flow A requires password creation for new accounts
-      if (!existingUser && !passwordHash) {
-        throw new Error('Password is required to set up a new account.');
-      }
+        const normalizedEmail = normalizeEmail(invitation.email);
 
-      // ATOMIC STATUS LOCK
-      const lockResult = await tx.invitation.updateMany({
-        where: { id: invitation.id, status: { in: ['pending', 'viewed'] } },
-        data: {
-          status: 'accepted',
-          acceptedAt: new Date(),
-          usedAt: new Date(),
-        },
-      });
+        // Check authenticated user email mismatch
+        if (actorEmail) {
+          const normalizedActorEmail = normalizeEmail(actorEmail);
+          if (normalizedActorEmail && normalizedActorEmail !== normalizedEmail) {
+            throw new InvitationEmailMismatchError(invitation.email, actorEmail);
+          }
+        }
 
-      if (lockResult.count === 0) {
-        throw new InvitationAlreadyAcceptedError();
-      }
+        const existingUser = await tx.user.findFirst({
+          where: { email: { equals: normalizedEmail, mode: 'insensitive' } },
+        });
 
-      let user: any;
-      if (existingUser) {
-        // Flow B — Existing User Role Assignment or Role Change
-        user = await tx.user.update({
-          where: { id: existingUser.id },
+        // Flow A requires password creation for new accounts
+        if (!existingUser && !passwordHash) {
+          throw new Error('Password is required to set up a new account.');
+        }
+
+        // ATOMIC STATUS LOCK (guarantees exactly 1 winner under concurrent acceptance)
+        const lockResult = await tx.invitation.updateMany({
+          where: { id: invitation.id, status: { in: ['pending', 'viewed'] } },
           data: {
-            tenantId: invitation.tenantId,
-            role: invitation.roleName,
-            status: 'active',
-            emailVerified: true,
+            status: 'accepted',
+            acceptedAt: new Date(),
+            usedAt: new Date(),
           },
         });
-      } else {
-        // Flow A — New Account Creation
-        user = await tx.user.create({
-          data: {
+
+        if (lockResult.count === 0) {
+          throw new InvitationAlreadyAcceptedError();
+        }
+
+        let user: any;
+        if (existingUser) {
+          // Flow B — Existing User (active or soft-deleted/archived)
+          user = await tx.user.update({
+            where: { id: existingUser.id },
+            data: {
+              tenantId: invitation.tenantId,
+              role: invitation.roleName,
+              status: 'active',
+              deletedAt: null,
+              emailVerified: true,
+              emailVerifiedAt: existingUser.emailVerifiedAt || new Date(),
+              failedLoginAttempts: 0,
+              lockedUntil: null,
+              ...(passwordHash ? { passwordHash } : {}),
+              ...(firstName && (!existingUser.firstName || existingUser.firstName === 'Team') ? { firstName: firstName.trim() } : {}),
+              ...(lastName && (!existingUser.lastName || existingUser.lastName === 'Member') ? { lastName: lastName.trim() } : {}),
+              tokenVersion: (existingUser.tokenVersion || 0) + 1,
+              updatedAt: new Date(),
+            },
+          });
+        } else {
+          // Flow A — New Account Creation
+          user = await tx.user.create({
+            data: {
+              tenantId: invitation.tenantId,
+              email: normalizedEmail,
+              passwordHash: passwordHash!,
+              firstName: firstName ? firstName.trim() : 'Team',
+              lastName: lastName ? lastName.trim() : 'Member',
+              role: invitation.roleName,
+              emailVerified: true,
+              emailVerifiedAt: new Date(),
+              status: 'active',
+              failedLoginAttempts: 0,
+              lockedUntil: null,
+            },
+          });
+        }
+
+        let assignedClinicId: string | null = null;
+
+        // Doctor Entity Reconciliation when accepting doctor/dentist role
+        if (invitation.roleName === 'doctor' && tx.doctor) {
+          const existingDoctor = await tx.doctor.findFirst({
+            where: {
+              tenantId: invitation.tenantId,
+              email: { equals: normalizedEmail, mode: 'insensitive' },
+            },
+          });
+
+          if (existingDoctor) {
+            assignedClinicId = existingDoctor.clinicId;
+            if (existingDoctor.deletedAt !== null || existingDoctor.status !== 'active') {
+              await tx.doctor.update({
+                where: { id: existingDoctor.id },
+                data: {
+                  deletedAt: null,
+                  status: 'active',
+                  updatedAt: new Date(),
+                },
+              });
+            }
+          } else {
+            const clinic = await tx.clinic.findFirst({
+              where: { tenantId: invitation.tenantId, deletedAt: null },
+              orderBy: { createdAt: 'asc' },
+            });
+
+            if (clinic) {
+              assignedClinicId = clinic.id;
+              const docFullName = `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.email;
+              const docDisplayName = docFullName.startsWith('Dr.') ? docFullName : `Dr. ${docFullName}`;
+              await tx.doctor.create({
+                data: {
+                  tenantId: invitation.tenantId,
+                  clinicId: clinic.id,
+                  fullName: docFullName,
+                  displayName: docDisplayName,
+                  specialization: 'General Dentistry',
+                  email: user.email.toLowerCase().trim(),
+                  status: 'active',
+                  deletedAt: null,
+                },
+              });
+            }
+          }
+        }
+
+        // Transaction-Aware Role Assignment (executes strictly via `tx`)
+        if (this.rbacBootstrapService) {
+          await this.rbacBootstrapService.assignSystemRoleToUser({
+            userId: user.id,
             tenantId: invitation.tenantId,
-            email: invitation.email.toLowerCase().trim(),
-            passwordHash: passwordHash!,
-            firstName: firstName || 'Team',
-            lastName: lastName || 'Member',
-            role: invitation.roleName,
-            emailVerified: true,
-            emailVerifiedAt: new Date(),
-            status: 'active',
-          },
-        });
-      }
+            roleName: invitation.roleName,
+            clinicId: assignedClinicId,
+            tx,
+          });
+        }
 
-      // Assign System Role to user_roles
-      if (this.rbacBootstrapService) {
-        await this.rbacBootstrapService.assignSystemRoleToUser({
-          userId: user.id,
-          tenantId: invitation.tenantId,
-          roleName: invitation.roleName,
-        });
-      }
+        const txDuration = Date.now() - txStartTime;
+        console.info(`[InvitationService] invitation.accept.transaction.completed [invitationId=${invitation.id}] [userId=${user.id}] [txDuration=${txDuration}ms]`);
 
-      // Audit Log
-      if (this.eventPublisher) {
-        this.eventPublisher.publish({
-          eventType: 'auth.invitation.accepted',
-          occurredAt: new Date(),
-          requestId: invitation.id,
-          tenantId: invitation.tenantId,
-          userId: user.id,
-          ipAddress: 'system',
-          metadata: { invitationId: invitation.id, assignedRole: invitation.roleName, type: invitation.type },
-        }).catch(() => {});
-      }
+        return { user, invitation };
+      },
+      {
+        timeout: 10000, // 10s safety margin for serverless PostgreSQL latency
+        maxWait: 5000,  // 5s maximum wait for pool connection
+      },
+    );
 
-      const { passwordHash: _, tokenVersion: __, ...safeUser } = user as any;
-      return safeUser;
-    });
+    // Audit Log & Post-commit events (executed strictly outside the transaction)
+    if (this.eventPublisher) {
+      this.eventPublisher.publish({
+        eventType: 'auth.invitation.accepted',
+        occurredAt: new Date(),
+        requestId: result.invitation.id,
+        tenantId: result.invitation.tenantId,
+        userId: result.user.id,
+        ipAddress: 'system',
+        metadata: { invitationId: result.invitation.id, assignedRole: result.invitation.roleName, type: result.invitation.type },
+      }).catch(() => {});
+    }
+
+    const totalDuration = Date.now() - startTime;
+    console.info(`[InvitationService] invitation.accept.completed [userId=${result.user.id}] [totalDuration=${totalDuration}ms]`);
+
+    const { passwordHash: _, tokenVersion: __, ...safeUser } = result.user as any;
+    return safeUser;
   }
 
   /**
@@ -586,6 +735,7 @@ export class InvitationService {
           email: true,
           roleName: true,
           status: true,
+          declineReason: true,
           expiresAt: true,
           createdAt: true,
           updatedAt: true,

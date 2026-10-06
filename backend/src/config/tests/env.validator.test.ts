@@ -43,6 +43,9 @@ describe('Environment Validator - Production Security Tests', () => {
       APP_URL: 'https://dental-ai-frontend.vercel.app',
       FRONTEND_URL: 'https://dental-ai-frontend.vercel.app',
       BACKEND_URL: 'https://dental-ai-backend-gy1y.onrender.com',
+      WHATSAPP_ACCESS_TOKEN: 'EAAB_test_mock_token_for_validation_testing_12345',
+      WHATSAPP_APP_SECRET: '0123456789abcdef0123456789abcdef',
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'test_verify_token_123456789',
       WHATSAPP_API_VERSION: 'v21.0',
     };
   }
@@ -211,6 +214,32 @@ describe('Environment Validator - Production Security Tests', () => {
   it('should fail in production when OPENAI_API_KEY does not start with sk-', () => {
     const env = getValidProdEnv();
     env.OPENAI_API_KEY = 'invalid_key_prefix_123456789012345';
+    process.env = env as any;
+
+    const mockExit = jest.spyOn(process, 'exit').mockImplementation((code?: any) => {
+      throw new Error(`process.exit: ${code}`);
+    });
+    const mockConsole = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(() => validateEnv()).toThrow('process.exit: 1');
+
+    mockExit.mockRestore();
+    mockConsole.mockRestore();
+  });
+
+  it('should accept valid pooled DATABASE_URL and direct DIRECT_URL', () => {
+    const env = getValidProdEnv();
+    env.DATABASE_URL = 'postgresql://prod_user:aK9%23mP9%24vL2@ep-test-pooler.c-11.us-east-1.aws.neon.tech:5432/neondb?sslmode=require&connect_timeout=15&pool_timeout=15&connection_limit=10';
+    (env as any).DIRECT_URL = 'postgresql://prod_user:aK9%23mP9%24vL2@ep-test.c-11.us-east-1.aws.neon.tech:5432/neondb?sslmode=require&connect_timeout=15';
+    process.env = env as any;
+
+    const config = validateEnv();
+    expect(config.DATABASE_URL).toContain('-pooler');
+  });
+
+  it('should reject malformed or non-postgresql DATABASE_URL', () => {
+    const env = getValidProdEnv();
+    env.DATABASE_URL = 'mysql://user:pass@localhost:3306/db';
     process.env = env as any;
 
     const mockExit = jest.spyOn(process, 'exit').mockImplementation((code?: any) => {

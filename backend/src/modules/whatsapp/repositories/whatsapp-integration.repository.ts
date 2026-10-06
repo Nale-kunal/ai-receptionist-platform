@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WhatsApp Integration Repository
  *
  * Data access for WhatsAppIntegration records.
@@ -16,6 +16,13 @@ export class WhatsAppIntegrationRepository {
   public async findByPhoneNumber(phoneNumber: string): Promise<SafeWhatsAppIntegration | null> {
     const record = await this.prisma.whatsAppIntegration.findUnique({
       where: { phoneNumber },
+    });
+    return record ? this.toSafe(record) : null;
+  }
+
+  public async findByPhoneNumberId(phoneNumberId: string): Promise<SafeWhatsAppIntegration | null> {
+    const record = await this.prisma.whatsAppIntegration.findUnique({
+      where: { phoneNumberId },
     });
     return record ? this.toSafe(record) : null;
   }
@@ -57,9 +64,10 @@ export class WhatsAppIntegrationRepository {
         phoneNumberId: params.phoneNumberId,
         wabaId: params.wabaId,
         displayName: params.displayName,
-        webhookVerifyToken: params.webhookVerifyToken,
+        webhookVerifyToken: params.webhookVerifyToken ?? null,
         status: WHATSAPP_INTEGRATION_STATUS_INACTIVE,
         isEnabled: false,
+        wabaSubscribed: false,
         settings: settings as any,
       },
     });
@@ -124,6 +132,7 @@ export class WhatsAppIntegrationRepository {
       displayName: record.displayName,
       status: record.status,
       isEnabled: record.isEnabled,
+      wabaSubscribed: Boolean(record.wabaSubscribed),
       settings: { ...DEFAULT_WHATSAPP_SETTINGS, ...(record.settings as WhatsAppIntegrationSettings) },
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,

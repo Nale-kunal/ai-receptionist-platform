@@ -35,6 +35,7 @@ export class AppConfigService {
       },
       database: {
         url: rawEnv.DATABASE_URL,
+        directUrl: rawEnv.DIRECT_URL,
         logQueries: process.env['PRISMA_LOG_QUERIES'] === 'true',
       },
       logging: {

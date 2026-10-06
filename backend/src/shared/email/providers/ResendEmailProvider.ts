@@ -25,8 +25,11 @@ export class ResendEmailProvider implements IEmailProvider {
       };
     }
 
-    // In automated test mode, suppress live external HTTP email dispatch unless explicitly requested via ENABLE_LIVE_EMAIL_TESTS=true
-    if (process.env['NODE_ENV'] === 'test' && process.env['ENABLE_LIVE_EMAIL_TESTS'] !== 'true') {
+    // In automated test mode or for synthetic test domains (@example.com, @test.com),
+    // suppress live external HTTP email dispatch unless explicitly requested via ENABLE_LIVE_EMAIL_TESTS=true
+    const isSyntheticDomain = options.to.endsWith('@example.com') || options.to.endsWith('@test.com');
+    const isTestMode = process.env['NODE_ENV'] === 'test';
+    if ((isTestMode || isSyntheticDomain) && process.env['ENABLE_LIVE_EMAIL_TESTS'] !== 'true') {
       console.info(`[ResendEmailProvider] 🧪 Test Guard: Suppressing live Resend API call for '${options.to}'`);
       return {
         success: true,
@@ -38,10 +41,9 @@ export class ResendEmailProvider implements IEmailProvider {
     try {
       let targetRecipient = options.to;
       const fromAddress = options.from || this.defaultFrom;
-      const isDevOnboarding = fromAddress.includes('onboarding@resend.dev') || process.env['NODE_ENV'] === 'development';
       const devOverride = process.env['RESEND_TEST_RECIPIENT_OVERRIDE'];
 
-      if (isDevOnboarding && devOverride && targetRecipient !== devOverride) {
+      if (devOverride && devOverride.trim() && targetRecipient !== devOverride && process.env['NODE_ENV'] === 'development') {
         console.info(`[ResendEmailProvider] Dev Mode Override: Routing outbound mail from '${targetRecipient}' -> '${devOverride}'`);
         targetRecipient = devOverride;
       }

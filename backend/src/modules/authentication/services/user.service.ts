@@ -1,11 +1,12 @@
 import argon2 from 'argon2';
-import type { UserRepository } from '../repositories/user.repository';
+import { UserRepository } from '../repositories/user.repository';
 import type { User, PrismaClient } from '@prisma/client';
 import {
   ARGON2_MEMORY_COST,
   ARGON2_TIME_COST,
   ARGON2_PARALLELISM,
 } from '../constants/auth.constants';
+import { normalizeEmail } from '../../../shared/utils/email.utils';
 
 export interface CreateUserParams {
   tenantId: string;
@@ -474,16 +475,44 @@ export class UserService {
     return this.userRepository.findMany(params);
   }
 
-  public async deleteUser(id: string, tenantId: string, actorUserId?: string): Promise<User> {
+  public async revokeUser(
+    id: string,
+    tenantId: string,
+    actorUserId: string,
+    reason: string,
+  ): Promise<User> {
+    const trimmedReason = (reason || '').trim();
+    if (!trimmedReason) {
+      const err: any = new Error('Revocation reason is required.');
+      err.statusCode = 400;
+      err.code = 'MISSING_REASON';
+      throw err;
+    }
+    if (trimmedReason.length > 500) {
+      const err: any = new Error('Revocation reason cannot exceed 500 characters.');
+      err.statusCode = 400;
+      err.code = 'INVALID_REASON';
+      throw err;
+    }
+
     const user = await this.userRepository.findById(id);
     if (!user) {
-      throw new Error('User not found');
+      const err: any = new Error('User not found');
+      err.statusCode = 404;
+      err.code = 'USER_NOT_FOUND';
+      throw err;
     }
     if (user.tenantId !== tenantId) {
-      throw new Error('Tenant isolation violation');
+      const err: any = new Error('Tenant isolation violation');
+      err.statusCode = 403;
+      err.code = 'TENANT_ISOLATION_VIOLATION';
+      throw err;
     }
     if (actorUserId && user.id === actorUserId) {
-      throw new Error('You cannot delete your own account.');
+      const err: any = new Error('You cannot delete your own account.');
+      err.statusCode = 400;
+      err.code = 'CANNOT_DELETE_SELF';
+      throw err;
     }
 
     // ── LAST OWNER PROTECTION GUARD ──
@@ -495,61 +524,157 @@ export class UserService {
       }
     }
 
-    // Perform atomic membership removal (sets status = 'archived', deletedAt = now, increments tokenVersion)
-    const deleted = await this.userRepository.update(id, {
-      deletedAt: new Date(),
+    const revokedAt = new Date();
+
+    // 1. Fetch revoker and tenant information for audit and notification
+    let revokerName = 'Practice Administrator';
+    let tenantName = 'Practice';
+    let timezone = 'UTC';
+
+    if (this.prisma) {
+      const [actorUser, tenant] = await Promise.all([
+        actorUserId ? this.prisma.user.findUnique({ where: { id: actorUserId } }) : null,
+        this.prisma.tenant.findUnique({ where: { id: tenantId } }),
+      ]);
+
+      if (actorUser) {
+        revokerName = `${actorUser.firstName ?? ''} ${actorUser.lastName ?? ''}`.trim() || actorUser.email || 'Practice Owner';
+      }
+      if (tenant) {
+        tenantName = tenant.name || 'Practice';
+        timezone = tenant.timezone || 'UTC';
+      }
+    }
+
+    // 2. Perform atomic user update
+    const revoked = await this.userRepository.update(id, {
+      deletedAt: revokedAt,
       status: 'archived',
+      revokedAt,
+      revokedByUserId: actorUserId,
+      revocationReason: trimmedReason,
       tokenVersion: (user.tokenVersion || 0) + 1,
     });
 
-    // Revoke all active sessions immediately
+    // 3. Invalidate caches immediately
+    UserRepository.invalidateRelationCache(id);
+
+    // 4. Revoke all active sessions & user roles, deactivate doctor profile, record audit log
     if (this.prisma) {
-      await this.prisma.session
-        .updateMany({
+      await Promise.all([
+        // Revoke active sessions
+        this.prisma.session.updateMany({
           where: { userId: id, status: 'active' },
           data: { status: 'revoked' },
-        })
-        .catch(() => {});
+        }).catch(() => {}),
 
-      // Clear RBAC user_roles join entries
-      if (this.prisma.userRole) {
-        await this.prisma.userRole
-          .deleteMany({
-            where: { userId: id },
-          })
-          .catch(() => {});
-      }
+        // Update user_roles join entries
+        this.prisma.userRole.updateMany({
+          where: { userId: id, isActive: true },
+          data: { revokedAt, isActive: false },
+        }).catch(() => {}),
+
+        // If the user was a doctor in this tenant, deactivate doctor record
+        user.email
+          ? this.prisma.doctor.updateMany({
+              where: {
+                tenantId,
+                email: normalizeEmail(user.email),
+                deletedAt: null,
+              },
+              data: {
+                status: 'inactive',
+                deletedAt: revokedAt,
+              },
+            }).catch(() => {})
+          : Promise.resolve(),
+
+        // Immutable Audit Log
+        this.prisma.rbacAuditLog.create({
+          data: {
+            tenantId,
+            clinicId: user.clinicId || null,
+            userId: id,
+            actorId: actorUserId || null,
+            eventType: 'membership.access_revoked',
+            resource: 'user',
+            permission: 'users.manage',
+            roleName: user.role,
+            outcome: 'revoked',
+            metadata: {
+              revokedAt: revokedAt.toISOString(),
+              revokedByUserId: actorUserId,
+              revokerName,
+              revocationReason: trimmedReason,
+              userEmail: user.email,
+              userName: `${user.firstName} ${user.lastName}`.trim(),
+              role: user.role,
+              tenantName,
+            },
+            occurredAt: revokedAt,
+          },
+        }).catch((err) => {
+          console.error('[UserService] Failed to write RbacAuditLog:', err);
+        }),
+      ]);
     }
 
+    // 5. Idempotent Email Notification
     if (this.emailService) {
       try {
-        let tenantName = 'Practice';
-        if (this.prisma) {
-          const t = await this.prisma.tenant.findUnique({ where: { id: tenantId } });
-          if (t?.name) tenantName = t.name;
-        }
-        await this.emailService.sendMembershipRemovedEmail({
+        const idempotencyKey = `access_revoked:${tenantId}:${user.id}:${revokedAt.toISOString()}`;
+        await this.emailService.sendAccessRevokedEmail({
+          idempotencyKey,
           to: user.email,
+          recipientName: `${user.firstName} ${user.lastName}`.trim(),
+          roleName: user.role,
           tenantName,
+          clinicName: tenantName,
+          revokerName,
+          revokedAt,
+          reason: trimmedReason,
           tenantId,
+          clinicId: user.clinicId || undefined,
+          timezone,
         });
       } catch (err) {
-        console.error('[UserService] Failed to send membership removal email:', err);
+        console.error('[UserService] Failed to send access revocation email:', err);
       }
     }
 
+    // 6. Publish events
     if (this.publisher) {
-      await this.publisher.publish({
-        eventType: 'user.deleted',
-        occurredAt: new Date(),
-        requestId: '',
-        tenantId,
-        userId: id,
-        actorUserId: actorUserId || id,
-      });
+      await Promise.all([
+        this.publisher.publish({
+          eventType: 'user.revoked',
+          occurredAt: revokedAt,
+          requestId: '',
+          tenantId,
+          userId: id,
+          actorUserId: actorUserId || id,
+        }).catch(() => {}),
+        this.publisher.publish({
+          eventType: 'user.deleted',
+          occurredAt: revokedAt,
+          requestId: '',
+          tenantId,
+          userId: id,
+          actorUserId: actorUserId || id,
+        }).catch(() => {}),
+      ]);
     }
 
-    return deleted;
+    return revoked;
+  }
+
+  public async deleteUser(
+    id: string,
+    tenantId: string,
+    actorUserId?: string,
+    reason?: string,
+  ): Promise<User> {
+    const finalReason = reason && reason.trim() ? reason.trim() : 'Account access removed by clinic administrator.';
+    return this.revokeUser(id, tenantId, actorUserId || '', finalReason);
   }
 
   public async restoreUser(id: string, tenantId: string): Promise<User> {

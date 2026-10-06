@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WhatsApp Webhook Controller
  *
  * Handles two Meta Cloud API webhook flows:
@@ -81,18 +81,16 @@ export class WhatsAppWebhookController {
   public verify = (req: Request, res: Response): void => {
     const mode      = req.query['hub.mode'];
     const token     = req.query['hub.verify_token'] as string | undefined;
-    const challenge = req.query['hub.challenge'];
+    const challenge = req.query['hub.challenge'] as string | undefined;
 
     if (mode !== 'subscribe' || !token || !challenge) {
-      res.status(400).json({ error: 'Invalid verification request' });
+      res.status(403).json({ error: 'Forbidden' });
       return;
     }
 
-    // Token is checked against integration-level verify tokens in a production
-    // multi-tenant setup. For single-instance, we also accept the env var token.
+    // Platform-level Meta Webhook verification token (Option A)
     const envToken = process.env['WHATSAPP_WEBHOOK_VERIFY_TOKEN'];
 
-    // Timing-safe comparison of verify token
     let tokenValid = false;
     if (envToken) {
       try {
@@ -107,13 +105,11 @@ export class WhatsAppWebhookController {
     }
 
     if (!tokenValid) {
-      // Also allow per-integration verify tokens (for multi-tenant)
-      // This check is async, but for GET verification we do a simpler path
-      // Full per-integration verification is handled at integration activation time
       res.status(403).json({ error: 'Forbidden' });
       return;
     }
 
+    // Return challenge text with 200 OK per Meta specifications
     res.status(200).send(challenge);
   };
 
@@ -122,41 +118,46 @@ export class WhatsAppWebhookController {
   // ---------------------------------------------------------------------------
 
   public receive = async (req: Request, res: Response): Promise<void> => {
-    // Generate correlation ID for tracing
     const correlationId = (req.headers['x-request-id'] as string | undefined)
       ?? (req.headers['x-correlation-id'] as string | undefined)
       ?? crypto.randomUUID();
 
-    // Body MUST be raw Buffer (set by raw body parser middleware on this route)
-    const rawBody = req.body as Buffer;
-    const sigHeader = (req.headers['x-hub-signature-256'] as string | undefined) ?? '';
-
-    // Always return 200 first-thing for non-critical processing to prevent Meta retries
-    // We do signature verification synchronously before 200 to reject invalid requests
-    const isValidSignature = this.provider.verifyWebhookSignature(rawBody, sigHeader);
-
-    if (!isValidSignature) {
-      console.warn(`[WhatsApp Webhook] Signature verification FAILED [corr=${correlationId}]`);
-      // Return 200 anyway to prevent Meta from retrying a genuinely bad request
-      // but do NOT process it. Log for audit.
-      res.status(200).json({ status: 'ok' });
+    // Body MUST be a raw Buffer (guaranteed by route-level express.raw)
+    const rawBody = req.body;
+    if (!Buffer.isBuffer(rawBody)) {
+      console.warn(`[WhatsApp Webhook] Body is not a Buffer (middleware misconfiguration) [corr=${correlationId}]`);
+      res.status(400).json({ error: 'Invalid request body format' });
       return;
     }
 
-    // Parse JSON from raw body
+    const sigHeader = (req.headers['x-hub-signature-256'] as string | undefined) ?? '';
+    if (!sigHeader) {
+      console.warn(`[WhatsApp Webhook] Missing X-Hub-Signature-256 header [corr=${correlationId}]`);
+      res.status(401).json({ error: 'Missing webhook signature' });
+      return;
+    }
+
+    const isValidSignature = this.provider.verifyWebhookSignature(rawBody, sigHeader);
+    if (!isValidSignature) {
+      console.warn(`[WhatsApp Webhook] Signature verification FAILED [corr=${correlationId}]`);
+      res.status(401).json({ error: 'Invalid webhook signature' });
+      return;
+    }
+
+    // Parse JSON from validated raw body
     let payload: unknown;
     try {
       payload = JSON.parse(rawBody.toString('utf8'));
     } catch {
       console.warn(`[WhatsApp Webhook] Malformed JSON [corr=${correlationId}]`);
-      res.status(200).json({ status: 'ok' });
+      res.status(400).json({ error: 'Malformed JSON payload' });
       return;
     }
 
-    // Return 200 immediately — all processing is asynchronous
+    // Return 200 immediately to Meta — all processing is asynchronous
     res.status(200).json({ status: 'ok' });
 
-    // Process asynchronously (intentionally fire-and-forget after 200)
+    // Process asynchronously (fire-and-forget after HTTP 200)
     this.processWebhookAsync(payload, rawBody, sigHeader, correlationId).catch((err) => {
       console.error(`[WhatsApp Webhook] Async processing error [corr=${correlationId}]:`, err);
     });
@@ -176,7 +177,6 @@ export class WhatsAppWebhookController {
     const parsed = MetaMessageSchema.safeParse(payload);
 
     if (!parsed.success) {
-      // May be a status update or unsupported object type — audit and skip
       await this.webhookEventRepo.create({
         rawPayload: payload as Record<string, unknown>,
         signatureHeader: sigHeader,
@@ -190,8 +190,11 @@ export class WhatsAppWebhookController {
     const data = parsed.data;
 
     for (const entry of data.entry) {
+      const wabaId = entry.id;
+
       for (const change of entry.changes) {
         const value = change.value;
+        const metaPhoneNumberId = value.metadata.phone_number_id;
         const destinationPhone = '+' + value.metadata.display_phone_number.replace(/\D/g, '');
 
         // Persist raw webhook event for audit
@@ -210,20 +213,23 @@ export class WhatsAppWebhookController {
             try {
               await this.messageRepo.updateByProviderMessageId(status.id, { status: status.status });
             } catch {
-              // Non-fatal — delivery receipt processing
+              // Non-fatal delivery receipt processing
             }
           }
           await this.webhookEventRepo.updateStatus(eventRecord.id, 'processed');
           continue;
         }
 
-        // Resolve tenant from destination phone
-        const resolved = await this.tenantResolver.tryResolve(destinationPhone);
+        // Multi-tenant resolution: match by Meta phone_number_id and verify WABA ID boundary
+        const resolved = await this.tenantResolver.tryResolveByMeta(metaPhoneNumberId, wabaId, destinationPhone);
 
         if (!resolved) {
-          console.warn(`[WhatsApp Webhook] Unresolvable phone: ${destinationPhone} [corr=${correlationId}]`);
-          await this.webhookEventRepo.updateStatus(eventRecord.id, 'quarantined',
-            `No active integration for phone: ${destinationPhone}`);
+          console.warn(`[WhatsApp Webhook] Unresolvable channel: pnId=${metaPhoneNumberId} waba=${wabaId} [corr=${correlationId}]`);
+          await this.webhookEventRepo.updateStatus(
+            eventRecord.id,
+            'quarantined',
+            `No active integration for phone_number_id: ${metaPhoneNumberId} (WABA: ${wabaId})`,
+          );
           continue;
         }
 

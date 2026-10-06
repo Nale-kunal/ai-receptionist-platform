@@ -40,9 +40,13 @@ export const Register: React.FC = () => {
     setValidatingToken(true);
     api.validateInvitationToken(inviteToken)
       .then((data) => {
+        if (data.nextAction === 'SIGN_IN' || data.account?.exists || data.isExistingUser) {
+          navigate(`/invite/review?token=${inviteToken}`, { replace: true });
+          return;
+        }
         setInvitationMeta(data);
-        if (data.email) {
-          setEmail(data.email);
+        if (data.invitedEmail || data.email) {
+          setEmail(data.invitedEmail || data.email);
         }
       })
       .catch((err) => {
@@ -52,7 +56,7 @@ export const Register: React.FC = () => {
       .finally(() => {
         setValidatingToken(false);
       });
-  }, [inviteToken]);
+  }, [inviteToken, navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WhatsApp Module Errors
  */
 
@@ -66,3 +66,14 @@ export class WhatsAppIsolationViolationError extends WhatsAppError {
     super('Tenant isolation violation detected.', 'WHATSAPP_ISOLATION_VIOLATION', 403);
   }
 }
+
+export class WhatsAppWabaMismatchError extends WhatsAppError {
+  constructor(expectedWabaId: string, receivedWabaId: string) {
+    super(
+      `WABA ID mismatch: expected ${expectedWabaId}, received ${receivedWabaId}.`,
+      'WHATSAPP_WABA_MISMATCH',
+      403,
+    );
+  }
+}
+

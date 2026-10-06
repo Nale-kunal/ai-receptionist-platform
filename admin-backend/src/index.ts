@@ -108,6 +108,8 @@ async function bootstrap(): Promise<void> {
   app.patch('/api/v1/admin/clinics/:id', clinicController.update);
   app.post('/api/v1/admin/clinics/:id/suspend', clinicController.suspend);
   app.post('/api/v1/admin/clinics/:id/activate', clinicController.activate);
+  app.post('/api/v1/admin/clinics/:id/force-logout', clinicController.forceLogoutClinic);
+  app.post('/api/v1/admin/clinics/:id/users/:userId/force-logout', clinicController.forceLogoutUser);
   app.get('/api/v1/admin/clinics/:id/users', clinicController.getUsers);
   app.get('/api/v1/admin/clinics/:id/doctors', clinicController.getDoctors);
   app.get('/api/v1/admin/clinics/:id/patients', clinicController.getPatients);
@@ -120,6 +122,7 @@ async function bootstrap(): Promise<void> {
   app.get('/api/v1/admin/whatsapp/:id', whatsappController.getById);
   app.post('/api/v1/admin/whatsapp/provision', whatsappController.provision);
   app.patch('/api/v1/admin/whatsapp/:id', whatsappController.update);
+  app.post('/api/v1/admin/whatsapp/:id/test-connection', whatsappController.testConnection);
   app.post('/api/v1/admin/whatsapp/:id/activate', whatsappController.activate);
   app.post('/api/v1/admin/whatsapp/:id/deactivate', whatsappController.deactivate);
 

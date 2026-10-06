@@ -6,7 +6,7 @@ import { Sun, Moon } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 
 export const Login: React.FC = () => {
-  const { login } = useAuth();
+  const { login, logout, user } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
@@ -14,12 +14,21 @@ export const Login: React.FC = () => {
 
   const searchParams = new URLSearchParams(location.search);
   const redirectParam = searchParams.get('redirect');
+  const defaultEmail = searchParams.get('email') || '';
+  const isForce = searchParams.get('force') === 'true';
   const storedInviteRedirect = sessionStorage.getItem('pending_invite_redirect');
   const redirectPath =
     redirectParam ||
     storedInviteRedirect ||
     (location.state as any)?.from?.pathname ||
     '/';
+
+  // If arriving with force login flag and a session exists, clear the existing session
+  React.useEffect(() => {
+    if (isForce && user) {
+      logout().catch(() => {});
+    }
+  }, [isForce, user, logout]);
 
   const handleLoginSubmit = async (email: string, pass: string) => {
     setLoading(true);
@@ -142,6 +151,7 @@ export const Login: React.FC = () => {
           isLoading={loading}
           onForgotPasswordClick={() => navigate('/forgot-password')}
           onRegisterClick={() => navigate('/register')}
+          defaultEmail={defaultEmail}
         />
       </div>
     </div>

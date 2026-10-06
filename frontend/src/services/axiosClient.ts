@@ -149,8 +149,11 @@ axiosClient.interceptors.response.use(
 
       try {
         const sessionId = tokenManager.getSessionId() || 'auto-restore';
-        // Trigger silent token rotation using secure cookie + sessionId
-        const res = await axiosClient.post(AUTH_ENDPOINTS.REFRESH, { sessionId });
+        // Trigger silent token rotation using raw axios instance with credentials to prevent interceptor loops
+        const res = await axios.post(`${API_URL}${AUTH_ENDPOINTS.REFRESH}`, { sessionId }, {
+          withCredentials: true,
+          headers: { 'Content-Type': 'application/json' },
+        });
         const data = res.data?.data || res.data;
         const newAccessToken = data.accessToken;
 
@@ -167,13 +170,15 @@ axiosClient.interceptors.response.use(
           originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
         }
         return axiosClient(originalRequest);
-      } catch (refreshError) {
+      } catch (refreshError: any) {
         isRefreshing = false;
         processQueue(refreshError, null);
 
-        // Clear tokens and dispatch unauthorized event to transition to login state
-        tokenManager.clear();
-        window.dispatchEvent(new Event('auth_unauthorized'));
+        // Only clear tokens and dispatch unauthorized if it was an actual 401 unauthenticated failure
+        if (refreshError?.response?.status === 401) {
+          tokenManager.clear();
+          window.dispatchEvent(new Event('auth_unauthorized'));
+        }
 
         return Promise.reject(refreshError);
       }

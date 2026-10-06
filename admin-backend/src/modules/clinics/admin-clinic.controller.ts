@@ -250,19 +250,58 @@ export class AdminClinicController {
   getUsers = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const { id } = req.params;
-      const clinic = await this.prisma.clinic.findFirst({ where: { id, deletedAt: null }, select: { tenantId: true } });
+      const clinic = await this.prisma.clinic.findFirst({ where: { id, deletedAt: null }, select: { id: true, tenantId: true, ownerId: true } });
       if (!clinic) {
         res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Clinic not found' } });
         return;
       }
 
-      // Users are scoped by tenantId AND clinicId to avoid cross-tenant data leaks
+      // Users are scoped by tenantId (clinic-assigned staff, clinic owner, or tenant-scoped staff)
       const users = await this.prisma.user.findMany({
-        where: { tenantId: clinic.tenantId, clinicId: id, deletedAt: null },
-        select: { id: true, email: true, firstName: true, lastName: true, role: true, status: true, createdAt: true },
+        where: {
+          tenantId: clinic.tenantId,
+          OR: [
+            { clinicId: id },
+            { id: clinic.ownerId },
+            { clinicId: null },
+          ],
+        },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          role: true,
+          status: true,
+          createdAt: true,
+          deletedAt: true,
+          revokedAt: true,
+          revokedByUserId: true,
+          revocationReason: true,
+        },
         orderBy: { createdAt: 'desc' },
       });
-      res.json({ success: true, data: { users } });
+
+      // Enrich users with revoker information if revoked
+      const revokerIds = Array.from(new Set(users.map((u) => u.revokedByUserId).filter(Boolean))) as string[];
+      const revokersMap = new Map<string, string>();
+      if (revokerIds.length > 0) {
+        const revokers = await this.prisma.user.findMany({
+          where: { id: { in: revokerIds } },
+          select: { id: true, firstName: true, lastName: true, email: true },
+        });
+        for (const r of revokers) {
+          const name = `${r.firstName ?? ''} ${r.lastName ?? ''}`.trim() || r.email;
+          revokersMap.set(r.id, name);
+        }
+      }
+
+      const safeUsers = users.map((u) => ({
+        ...u,
+        revokedByName: u.revokedByUserId ? (revokersMap.get(u.revokedByUserId) || 'Practice Administrator') : null,
+      }));
+
+      res.json({ success: true, data: { users: safeUsers } });
     } catch (err) {
       next(err);
     }
@@ -514,4 +553,152 @@ export class AdminClinicController {
       next(err);
     }
   };
+
+  /**
+   * Force logout all active sessions and invalidate JWTs for every user belonging to a clinic
+   */
+  forceLogoutClinic = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { id } = req.params;
+      const adminId = req.adminUser!.adminId;
+      const reason = (req.body?.reason as string | undefined)?.trim() || 'Super Admin initiated clinic force-logout';
+
+      const clinic = await this.prisma.clinic.findFirst({
+        where: { id, deletedAt: null },
+        select: { id: true, name: true, tenantId: true },
+      });
+
+      if (!clinic) {
+        res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Clinic not found' } });
+        return;
+      }
+
+      const result = await this.prisma.$transaction(async (tx: any) => {
+        // 1. Revoke all active sessions for this tenant
+        const revokedSessions = await tx.session.updateMany({
+          where: { tenantId: clinic.tenantId, status: 'active' },
+          data: { status: 'revoked' },
+        });
+
+        // 2. Increment tokenVersion on all users of this tenant for instant global JWT invalidation
+        const updatedUsers = await tx.user.updateMany({
+          where: { tenantId: clinic.tenantId },
+          data: { tokenVersion: { increment: 1 } },
+        });
+
+        // 3. Create immutable audit log entry
+        await tx.adminAuditLog.create({
+          data: {
+            adminId,
+            action: 'clinic.force_logout',
+            entityType: 'Clinic',
+            entityId: id,
+            tenantId: clinic.tenantId,
+            metadata: {
+              clinicName: clinic.name,
+              revokedSessionsCount: revokedSessions.count,
+              usersCount: updatedUsers.count,
+              reason,
+            },
+          },
+        });
+
+        return {
+          revokedSessionsCount: revokedSessions.count,
+          usersCount: updatedUsers.count,
+        };
+      });
+
+      adminCache.invalidateAll();
+
+      res.json({
+        success: true,
+        data: {
+          message: `Successfully logged out all users from ${clinic.name}`,
+          revokedSessions: result.revokedSessionsCount,
+          usersAffected: result.usersCount,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  /**
+   * Force logout all active sessions and invalidate JWTs for a specific user in a clinic
+   */
+  forceLogoutUser = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { id, userId } = req.params;
+      const adminId = req.adminUser!.adminId;
+      const reason = (req.body?.reason as string | undefined)?.trim() || 'Super Admin initiated user logout';
+
+      const clinic = await this.prisma.clinic.findFirst({
+        where: { id, deletedAt: null },
+        select: { id: true, name: true, tenantId: true },
+      });
+
+      if (!clinic) {
+        res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Clinic not found' } });
+        return;
+      }
+
+      const user = await this.prisma.user.findFirst({
+        where: { id: userId, tenantId: clinic.tenantId },
+        select: { id: true, email: true, firstName: true, lastName: true },
+      });
+
+      if (!user) {
+        res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found in this clinic' } });
+        return;
+      }
+
+      const result = await this.prisma.$transaction(async (tx: any) => {
+        // 1. Revoke all active sessions for this specific user
+        const revokedSessions = await tx.session.updateMany({
+          where: { userId, status: 'active' },
+          data: { status: 'revoked' },
+        });
+
+        // 2. Increment tokenVersion for this user for instant global JWT invalidation
+        await tx.user.update({
+          where: { id: userId },
+          data: { tokenVersion: { increment: 1 } },
+        });
+
+        // 3. Create immutable audit log entry
+        await tx.adminAuditLog.create({
+          data: {
+            adminId,
+            action: 'user.force_logout',
+            entityType: 'User',
+            entityId: userId,
+            tenantId: clinic.tenantId,
+            metadata: {
+              clinicId: id,
+              clinicName: clinic.name,
+              userEmail: user.email,
+              revokedSessionsCount: revokedSessions.count,
+              reason,
+            },
+          },
+        });
+
+        return { revokedSessionsCount: revokedSessions.count };
+      });
+
+      adminCache.invalidateAll();
+
+      res.json({
+        success: true,
+        data: {
+          message: `Successfully logged out user ${user.email}`,
+          revokedSessions: result.revokedSessionsCount,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  };
 }
+

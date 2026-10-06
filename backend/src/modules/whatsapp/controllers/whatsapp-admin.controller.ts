@@ -16,7 +16,7 @@ const CreateIntegrationSchema = z.object({
   phoneNumberId: z.string().default('PENDING_PROVISIONING'),
   wabaId: z.string().default('PENDING_PROVISIONING'),
   displayName: z.string().min(1).max(120),
-  webhookVerifyToken: z.string().default(() => `wa_verify_${Math.random().toString(36).slice(2, 12)}`),
+  webhookVerifyToken: z.string().optional(),
   settings: z.record(z.unknown()).optional(),
 });
 

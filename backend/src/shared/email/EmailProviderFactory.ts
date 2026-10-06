@@ -22,10 +22,12 @@ export class EmailProviderConfigurationError extends Error {
  */
 export class EmailProviderFactory {
   public static createProvider(overrideProviderName?: string): IEmailProvider {
+    // In test environment, always default to mock provider unless live email tests are explicitly enabled
+    const isTestEnv = process.env['NODE_ENV'] === 'test' && process.env['ENABLE_LIVE_EMAIL_TESTS'] !== 'true';
     const providerName = (
       overrideProviderName ||
-      process.env['EMAIL_PROVIDER'] ||
-      (process.env['NODE_ENV'] === 'test' ? 'mock' : 'resend')
+      (isTestEnv ? 'mock' : process.env['EMAIL_PROVIDER']) ||
+      'resend'
     ).toLowerCase();
 
     // Validate configuration in production mode

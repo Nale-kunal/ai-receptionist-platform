@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import { useAuth } from '../auth/hooks';
 import {
   ShieldCheck,
   User,
@@ -9,9 +10,11 @@ import {
   EyeOff,
   CheckCircle,
   XCircle,
+  X,
   Loader2,
   Building2,
   Clock,
+  AlertTriangle,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -27,7 +30,7 @@ interface InvitationMeta {
   inviterName?: string;
 }
 
-type Phase = 'validating' | 'form' | 'submitting' | 'success' | 'error';
+type Phase = 'validating' | 'form' | 'submitting' | 'success' | 'declined' | 'error';
 
 // ---------------------------------------------------------------------------
 // Role display helpers
@@ -64,6 +67,38 @@ function formatExpiry(iso: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Decline Reason Presets
+// ---------------------------------------------------------------------------
+interface DeclinePreset {
+  id: string;
+  label: string;
+  description: string;
+}
+
+const DECLINE_PRESETS: DeclinePreset[] = [
+  {
+    id: 'not_interested',
+    label: 'Not interested in this role',
+    description: 'I am not interested in joining this practice or role at this time.',
+  },
+  {
+    id: 'wrong_email',
+    label: 'Invited by mistake / wrong email',
+    description: 'This invitation was sent to the wrong email address.',
+  },
+  {
+    id: 'scheduling',
+    label: 'Schedule or commitment conflict',
+    description: 'Unable to commit due to existing schedules or other practice commitments.',
+  },
+  {
+    id: 'other',
+    label: 'Other reason',
+    description: 'Provide a custom reason for declining.',
+  },
+];
+
+// ---------------------------------------------------------------------------
 // Validation helpers
 // ---------------------------------------------------------------------------
 function validatePassword(pw: string): string | null {
@@ -80,11 +115,20 @@ function validatePassword(pw: string): string | null {
 export const AcceptInvitation: React.FC = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const { user, logout } = useAuth();
   const rawToken = searchParams.get('token') || sessionStorage.getItem('pending_invite_token') || '';
 
   const [phase, setPhase] = useState<Phase>('validating');
   const [meta, setMeta] = useState<InvitationMeta | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
+
+  const handleGoToLogin = async (prefillEmail?: string) => {
+    if (user) {
+      await logout();
+    }
+    const emailParam = prefillEmail ? `&email=${encodeURIComponent(prefillEmail)}` : '';
+    navigate(`/login?force=true${emailParam}`, { replace: true });
+  };
 
   // Form fields
   const [firstName, setFirstName] = useState('');
@@ -99,6 +143,14 @@ export const AcceptInvitation: React.FC = () => {
   const pwError = touched.password ? validatePassword(password) : null;
   const confirmError =
     touched.confirmPassword && password !== confirmPassword ? 'Passwords do not match.' : null;
+
+  // Decline state
+  const [showDeclineModal, setShowDeclineModal] = useState(false);
+  const [declineReasonPreset, setDeclineReasonPreset] = useState<string>('not_interested');
+  const [customDeclineReason, setCustomDeclineReason] = useState('');
+  const [declineSubmitting, setDeclineSubmitting] = useState(false);
+  const [declineError, setDeclineError] = useState('');
+  const [recordedDeclineReason, setRecordedDeclineReason] = useState('');
 
   // ---------------------------------------------------------------------------
   // Validate token on mount
@@ -115,7 +167,7 @@ export const AcceptInvitation: React.FC = () => {
 
     try {
       const data = await api.validateInvitationToken(rawToken);
-      if (data.isExistingUser || (data.type && data.type !== 'new_user')) {
+      if (data.nextAction === 'SIGN_IN' || data.account?.exists || data.isExistingUser) {
         navigate(`/invite/review?token=${rawToken}`, { replace: true });
         return;
       }
@@ -136,12 +188,11 @@ export const AcceptInvitation: React.FC = () => {
   }, [validateToken]);
 
   // ---------------------------------------------------------------------------
-  // Submit handler
+  // Submit accept handler
   // ---------------------------------------------------------------------------
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    // Touch all fields to trigger validation display
     setTouched({ firstName: true, lastName: true, password: true, confirmPassword: true });
 
     if (!firstName.trim() || !lastName.trim()) {
@@ -154,7 +205,12 @@ export const AcceptInvitation: React.FC = () => {
 
     setPhase('submitting');
     try {
-      await api.acceptInvitation({ token: rawToken, password, firstName: firstName.trim(), lastName: lastName.trim() });
+      await api.acceptInvitation({
+        token: rawToken,
+        password,
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+      });
       sessionStorage.removeItem('pending_invite_token');
       sessionStorage.removeItem('pending_invite_redirect');
       setPhase('success');
@@ -169,7 +225,44 @@ export const AcceptInvitation: React.FC = () => {
   };
 
   // ---------------------------------------------------------------------------
-  // Render helpers
+  // Submit decline handler
+  // ---------------------------------------------------------------------------
+  const handleConfirmDecline = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setDeclineSubmitting(true);
+    setDeclineError('');
+
+    const presetObj = DECLINE_PRESETS.find((p) => p.id === declineReasonPreset);
+    let finalReason = '';
+    if (declineReasonPreset === 'other') {
+      finalReason = customDeclineReason.trim() || 'Declined without detailed explanation.';
+    } else if (customDeclineReason.trim()) {
+      finalReason = `${presetObj?.label || 'Declined'}: ${customDeclineReason.trim()}`;
+    } else {
+      finalReason = presetObj?.description || presetObj?.label || 'Declined by invitee.';
+    }
+
+    try {
+      await api.declineInvitation({ token: rawToken, reason: finalReason });
+      sessionStorage.removeItem('pending_invite_token');
+      sessionStorage.removeItem('pending_invite_redirect');
+      setRecordedDeclineReason(finalReason);
+      setShowDeclineModal(false);
+      setPhase('declined');
+    } catch (err: any) {
+      console.error('[AcceptInvitation] Error declining invitation:', err);
+      setDeclineError(
+        err?.response?.data?.error?.message ||
+          err.message ||
+          'Failed to decline invitation. Please try again.',
+      );
+    } finally {
+      setDeclineSubmitting(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Render styles
   // ---------------------------------------------------------------------------
   const containerStyle: React.CSSProperties = {
     minHeight: '100vh',
@@ -226,7 +319,7 @@ export const AcceptInvitation: React.FC = () => {
               {errorMsg}
             </p>
             <button
-              onClick={() => navigate('/login')}
+              onClick={() => handleGoToLogin()}
               style={{
                 padding: '10px 24px',
                 borderRadius: 'var(--radius)',
@@ -239,6 +332,68 @@ export const AcceptInvitation: React.FC = () => {
               }}
             >
               Back to Login
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Declined phase ────────────────────────────────────────────────────────
+  if (phase === 'declined') {
+    return (
+      <div style={containerStyle}>
+        <div style={cardStyle}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{
+              width: 72, height: 72, borderRadius: '50%',
+              background: 'rgba(239,68,68,0.1)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              margin: '0 auto 20px',
+            }}>
+              <XCircle size={36} style={{ color: 'var(--error, #ef4444)' }} />
+            </div>
+            <h1 style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '8px' }}>
+              Invitation Declined
+            </h1>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: 1.6, marginBottom: '16px' }}>
+              You have declined the invitation to join <strong>{meta?.tenantName}</strong> as <strong>{getRoleLabel(meta?.roleName ?? '')}</strong>.
+            </p>
+            {recordedDeclineReason && (
+              <div style={{
+                background: 'var(--bg-secondary)',
+                borderRadius: '10px',
+                padding: '12px 16px',
+                border: '1px solid var(--border-color)',
+                marginBottom: '20px',
+                textAlign: 'left',
+              }}>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'block', marginBottom: '4px' }}>
+                  Reason Provided
+                </span>
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.4 }}>
+                  "{recordedDeclineReason}"
+                </p>
+              </div>
+            )}
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '24px' }}>
+              The practice administrator has been notified. If this was done in error, please contact them to send a new invitation.
+            </p>
+            <button
+              onClick={() => handleGoToLogin()}
+              style={{
+                padding: '12px 32px',
+                borderRadius: 'var(--radius)',
+                background: 'var(--primary)',
+                color: '#fff',
+                border: 'none',
+                cursor: 'pointer',
+                fontWeight: 600,
+                fontSize: '0.95rem',
+                width: '100%',
+              }}
+            >
+              Return to Login
             </button>
           </div>
         </div>
@@ -270,7 +425,7 @@ export const AcceptInvitation: React.FC = () => {
               You've been added as <strong>{getRoleLabel(meta?.roleName ?? '')}</strong>.
             </p>
             <button
-              onClick={() => navigate('/login')}
+              onClick={() => handleGoToLogin(meta?.email)}
               style={{
                 padding: '12px 32px',
                 borderRadius: 'var(--radius)',
@@ -471,39 +626,79 @@ export const AcceptInvitation: React.FC = () => {
             By accepting, you agree to the platform's terms of service and privacy policy.
           </p>
 
-          {/* Submit */}
-          <button
-            type="submit"
-            disabled={phase === 'submitting'}
-            style={{
-              padding: '13px 24px',
-              borderRadius: 'var(--radius)',
-              background: phase === 'submitting' ? 'var(--border-color)' : 'var(--primary)',
-              color: phase === 'submitting' ? 'var(--text-muted)' : '#fff',
-              border: 'none',
-              cursor: phase === 'submitting' ? 'not-allowed' : 'pointer',
-              fontWeight: 700,
-              fontSize: '0.95rem',
-              width: '100%',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              transition: 'all 0.2s',
-            }}
-          >
-            {phase === 'submitting' ? (
-              <>
-                <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
-                Creating Account…
-              </>
-            ) : (
-              <>
-                <CheckCircle size={16} />
-                Accept &amp; Join {meta?.tenantName}
-              </>
-            )}
-          </button>
+          {/* Action Buttons: Accept and Decline */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <button
+              type="submit"
+              disabled={phase === 'submitting'}
+              style={{
+                padding: '13px 24px',
+                borderRadius: 'var(--radius)',
+                background: phase === 'submitting' ? 'var(--border-color)' : 'var(--primary)',
+                color: phase === 'submitting' ? 'var(--text-muted)' : '#fff',
+                border: 'none',
+                cursor: phase === 'submitting' ? 'not-allowed' : 'pointer',
+                fontWeight: 700,
+                fontSize: '0.95rem',
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                transition: 'all 0.2s',
+              }}
+            >
+              {phase === 'submitting' ? (
+                <>
+                  <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                  Creating Account…
+                </>
+              ) : (
+                <>
+                  <CheckCircle size={16} />
+                  Accept &amp; Join {meta?.tenantName}
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setDeclineError('');
+                setShowDeclineModal(true);
+              }}
+              disabled={phase === 'submitting'}
+              style={{
+                padding: '11px 20px',
+                borderRadius: 'var(--radius)',
+                background: 'transparent',
+                color: 'var(--text-muted)',
+                border: '1px solid var(--border-color)',
+                cursor: 'pointer',
+                fontWeight: 600,
+                fontSize: '0.875rem',
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                transition: 'all 0.2s ease',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+                e.currentTarget.style.color = 'var(--error, #ef4444)';
+                e.currentTarget.style.background = 'rgba(239, 68, 68, 0.06)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = 'var(--border-color)';
+                e.currentTarget.style.color = 'var(--text-muted)';
+                e.currentTarget.style.background = 'transparent';
+              }}
+            >
+              <XCircle size={16} />
+              Decline Invitation
+            </button>
+          </div>
         </form>
 
         <p style={{ textAlign: 'center', marginTop: '20px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
@@ -516,6 +711,254 @@ export const AcceptInvitation: React.FC = () => {
           </button>
         </p>
       </div>
+
+      {/* ── Decline Modal with Reason Form ──────────────────────────────────── */}
+      {showDeclineModal && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1000,
+            background: 'rgba(0, 0, 0, 0.7)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '16px',
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !declineSubmitting) {
+              setShowDeclineModal(false);
+            }
+          }}
+        >
+          <div
+            style={{
+              background: 'var(--bg-primary)',
+              borderRadius: '16px',
+              border: '1px solid var(--border-color)',
+              boxShadow: 'var(--shadow-2xl, 0 25px 50px -12px rgba(0, 0, 0, 0.35))',
+              maxWidth: '480px',
+              width: '100%',
+              padding: '28px',
+              boxSizing: 'border-box',
+              animation: 'fadeIn 0.2s ease-out',
+            }}
+          >
+            {/* Modal Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{
+                  width: 36, height: 36, borderRadius: '10px',
+                  background: 'rgba(239, 68, 68, 0.12)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: 'var(--error, #ef4444)',
+                }}>
+                  <AlertTriangle size={20} />
+                </div>
+                <div>
+                  <h2 style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
+                    Decline Invitation
+                  </h2>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    {meta?.tenantName}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !declineSubmitting && setShowDeclineModal(false)}
+                disabled={declineSubmitting}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: 'var(--text-muted)',
+                  cursor: declineSubmitting ? 'not-allowed' : 'pointer',
+                  padding: '4px',
+                  borderRadius: '6px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: '20px' }}>
+              Are you sure you want to decline this invitation to join <strong>{meta?.tenantName}</strong> as <strong>{getRoleLabel(meta?.roleName ?? '')}</strong>? This invitation link will become invalid.
+            </p>
+
+            {declineError && (
+              <div style={{
+                background: 'rgba(239, 68, 68, 0.1)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                borderRadius: '8px',
+                padding: '10px 12px',
+                marginBottom: '16px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                color: 'var(--error, #ef4444)',
+                fontSize: '0.825rem',
+              }}>
+                <AlertTriangle size={16} style={{ flexShrink: 0 }} />
+                <span>{declineError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleConfirmDecline} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              {/* Reason Presets */}
+              <div>
+                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                  Please select a reason:
+                </label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {DECLINE_PRESETS.map((preset) => {
+                    const isSelected = declineReasonPreset === preset.id;
+                    return (
+                      <div
+                        key={preset.id}
+                        onClick={() => !declineSubmitting && setDeclineReasonPreset(preset.id)}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: '10px',
+                          padding: '10px 12px',
+                          borderRadius: '8px',
+                          border: `1px solid ${isSelected ? 'var(--primary)' : 'var(--border-color)'}`,
+                          background: isSelected ? 'rgba(99, 102, 241, 0.08)' : 'var(--bg-secondary)',
+                          cursor: declineSubmitting ? 'not-allowed' : 'pointer',
+                          transition: 'all 0.15s ease',
+                        }}
+                      >
+                        <input
+                          type="radio"
+                          id={`preset-${preset.id}`}
+                          name="declinePreset"
+                          checked={isSelected}
+                          onChange={() => setDeclineReasonPreset(preset.id)}
+                          disabled={declineSubmitting}
+                          style={{ marginTop: '3px', cursor: 'pointer', accentColor: 'var(--primary)' }}
+                        />
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                          <label
+                            htmlFor={`preset-${preset.id}`}
+                            style={{
+                              fontSize: '0.85rem',
+                              fontWeight: 600,
+                              color: isSelected ? 'var(--text-primary)' : 'var(--text-secondary)',
+                              cursor: 'pointer',
+                              marginBottom: '2px',
+                            }}
+                          >
+                            {preset.label}
+                          </label>
+                          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                            {preset.description}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Detailed reason textarea */}
+              <div>
+                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                  {declineReasonPreset === 'other' ? 'Specify your reason (required):' : 'Additional comments (optional):'}
+                </label>
+                <textarea
+                  value={customDeclineReason}
+                  onChange={(e) => setCustomDeclineReason(e.target.value.slice(0, 500))}
+                  placeholder={
+                    declineReasonPreset === 'other'
+                      ? 'Please describe why you are declining this invitation...'
+                      : 'Provide any additional details or feedback for the practice administrator...'
+                  }
+                  required={declineReasonPreset === 'other'}
+                  rows={3}
+                  disabled={declineSubmitting}
+                  style={{
+                    width: '100%',
+                    padding: '10px 12px',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border-color)',
+                    background: 'var(--bg-secondary)',
+                    color: 'var(--text-primary)',
+                    fontSize: '0.85rem',
+                    boxSizing: 'border-box',
+                    resize: 'vertical',
+                    fontFamily: 'inherit',
+                    outline: 'none',
+                  }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '4px' }}>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                    {customDeclineReason.length}/500
+                  </span>
+                </div>
+              </div>
+
+              {/* Modal Action Buttons */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginTop: '8px' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowDeclineModal(false)}
+                  disabled={declineSubmitting}
+                  style={{
+                    padding: '10px 16px',
+                    borderRadius: 'var(--radius)',
+                    background: 'var(--bg-secondary)',
+                    color: 'var(--text-secondary)',
+                    border: '1px solid var(--border-color)',
+                    cursor: declineSubmitting ? 'not-allowed' : 'pointer',
+                    fontWeight: 600,
+                    fontSize: '0.85rem',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  Keep Invitation
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={declineSubmitting || (declineReasonPreset === 'other' && !customDeclineReason.trim())}
+                  style={{
+                    padding: '10px 16px',
+                    borderRadius: 'var(--radius)',
+                    background: 'var(--error, #ef4444)',
+                    color: '#fff',
+                    border: 'none',
+                    cursor:
+                      declineSubmitting || (declineReasonPreset === 'other' && !customDeclineReason.trim())
+                        ? 'not-allowed'
+                        : 'pointer',
+                    fontWeight: 700,
+                    fontSize: '0.85rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
+                    opacity: declineReasonPreset === 'other' && !customDeclineReason.trim() ? 0.6 : 1,
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  {declineSubmitting ? (
+                    <>
+                      <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                      Declining…
+                    </>
+                  ) : (
+                    'Confirm Decline'
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Keyframe for spin */}
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>

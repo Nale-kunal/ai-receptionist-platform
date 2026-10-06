@@ -28,10 +28,14 @@ import {
   WHATSAPP_WORKER_POLL_IDLE_MS,
 } from '../constants/whatsapp.constants';
 
+import { isDbConnectivityError } from '../../../shared/email/queue/MailQueueService';
+
 export class WhatsAppJobService {
   private readonly workerId = `wa_worker_${crypto.randomUUID().slice(0, 8)}`;
   private running = false;
   private pollTimer: NodeJS.Timeout | null = null;
+  private isDbUnavailable = false;
+  private consecutiveDbFailures = 0;
 
   constructor(
     private readonly jobRepo: WhatsAppJobRepository,
@@ -49,9 +53,17 @@ export class WhatsAppJobService {
    * Performs stale lease recovery before starting the poll loop.
    */
   public async initialize(): Promise<void> {
-    const reclaimed = await this.jobRepo.reclaimExpiredLeases();
-    if (reclaimed > 0) {
-      console.log(`[WhatsApp Worker] Reclaimed ${reclaimed} expired lease(s) on startup.`);
+    try {
+      const reclaimed = await this.jobRepo.reclaimExpiredLeases();
+      if (reclaimed > 0) {
+        console.log(`[WhatsApp Worker] Reclaimed ${reclaimed} expired lease(s) on startup.`);
+      }
+    } catch (err) {
+      if (isDbConnectivityError(err)) {
+        console.warn('[WhatsApp Worker] Stale lease recovery deferred (database reconnecting).');
+      } else {
+        console.warn('[WhatsApp Worker] Stale lease recovery error on startup:', err);
+      }
     }
     this.running = true;
     this.schedulePoll(WHATSAPP_WORKER_POLL_IDLE_MS);
@@ -76,13 +88,21 @@ export class WhatsAppJobService {
 
   private schedulePoll(delayMs: number): void {
     if (!this.running) return;
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
+    }
     this.pollTimer = setTimeout(() => void this.poll(), delayMs);
+    if (typeof this.pollTimer.unref === 'function') {
+      this.pollTimer.unref();
+    }
   }
 
   private async poll(): Promise<void> {
     if (!this.running) return;
 
     let hadJob = false;
+    let nextDelayMs = WHATSAPP_WORKER_POLL_IDLE_MS;
 
     try {
       const job = await this.jobRepo.claimNextJob(this.workerId);
@@ -91,10 +111,27 @@ export class WhatsAppJobService {
         hadJob = true;
         await this.processJob(job);
       }
+
+      if (this.isDbUnavailable) {
+        this.isDbUnavailable = false;
+        this.consecutiveDbFailures = 0;
+        console.info('[WhatsApp Worker] Database connection restored. Resuming normal polling.');
+      }
+      nextDelayMs = hadJob ? WHATSAPP_WORKER_POLL_ACTIVE_MS : WHATSAPP_WORKER_POLL_IDLE_MS;
     } catch (err) {
-      console.error('[WhatsApp Worker] Poll error:', err instanceof Error ? err.message : String(err));
+      if (isDbConnectivityError(err)) {
+        this.consecutiveDbFailures++;
+        nextDelayMs = Math.min(2000 * Math.pow(2, Math.min(this.consecutiveDbFailures - 1, 5)), 60000);
+        if (!this.isDbUnavailable) {
+          this.isDbUnavailable = true;
+          console.warn(`[WhatsApp Worker] [DATABASE_UNAVAILABLE] DB unreachable. Backing off for ${Math.round(nextDelayMs)}ms.`);
+        }
+      } else {
+        console.error('[WhatsApp Worker] Poll error:', err instanceof Error ? err.message : String(err));
+        nextDelayMs = WHATSAPP_WORKER_POLL_IDLE_MS;
+      }
     } finally {
-      this.schedulePoll(hadJob ? WHATSAPP_WORKER_POLL_ACTIVE_MS : WHATSAPP_WORKER_POLL_IDLE_MS);
+      this.schedulePoll(nextDelayMs);
     }
   }
 

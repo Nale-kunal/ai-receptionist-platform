@@ -5,7 +5,7 @@
  * and automatically assigning system roles into the user_roles table upon registration.
  */
 
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient, Prisma } from '@prisma/client';
 import type { RoleRepository } from '../repositories/role.repository';
 import type { PermissionRepository } from '../repositories/permission.repository';
 import type { UserRoleRepository } from '../repositories/user-role.repository';
@@ -29,16 +29,19 @@ export class RbacBootstrapService {
 
   /**
    * Ensures all system permissions, system roles, and role_permissions are seeded in PostgreSQL.
-   * Can be called per-tenant or during initial platform startup.
+   * Can be called per-tenant, during initial platform startup, or within a transaction.
    */
-  public async ensureSystemRolesAndPermissions(tenantId: string | null = null): Promise<Record<string, string>> {
+  public async ensureSystemRolesAndPermissions(
+    tenantId: string | null = null,
+    db: Prisma.TransactionClient | PrismaClient = this.prisma,
+  ): Promise<Record<string, string>> {
     // Step 1 — Bulk seed permissions
-    const existingPerms = await this.prisma.permission.findMany();
+    const existingPerms = await db.permission.findMany();
     const existingPermNames = new Set(existingPerms.map((p) => p.name));
     const missingPerms = ALL_PERMISSIONS.filter((p) => !existingPermNames.has(p));
 
     if (missingPerms.length > 0) {
-      await this.prisma.permission.createMany({
+      await db.permission.createMany({
         data: missingPerms.map((permName) => {
           const parts = permName.split('.');
           const resource = parts[0] || 'system';
@@ -56,21 +59,21 @@ export class RbacBootstrapService {
       });
     }
 
-    const allPerms = await this.prisma.permission.findMany();
+    const allPerms = await db.permission.findMany();
     const permissionIdMap: Record<string, string> = {};
     for (const p of allPerms) {
       permissionIdMap[p.name] = p.id;
     }
 
     // Step 2 — Bulk seed system roles
-    const existingRoles = await this.prisma.role.findMany({
+    const existingRoles = await db.role.findMany({
       where: { tenantId: tenantId ?? null, deletedAt: null },
     });
     const existingRoleNames = new Set(existingRoles.map((r) => r.name));
     const missingRoles = SYSTEM_ROLES.filter((r) => !existingRoleNames.has(r));
 
     if (missingRoles.length > 0) {
-      await this.prisma.role.createMany({
+      await db.role.createMany({
         data: missingRoles.map((roleName) => ({
           tenantId: tenantId ?? null,
           name: roleName,
@@ -83,7 +86,7 @@ export class RbacBootstrapService {
       });
     }
 
-    const allRoles = await this.prisma.role.findMany({
+    const allRoles = await db.role.findMany({
       where: { tenantId: tenantId ?? null, deletedAt: null },
     });
     const roleIdMap: Record<string, string> = {};
@@ -106,7 +109,7 @@ export class RbacBootstrapService {
     }
 
     if (rolePermissionData.length > 0) {
-      await this.prisma.rolePermission.createMany({
+      await db.rolePermission.createMany({
         data: rolePermissionData,
         skipDuplicates: true,
       });
@@ -116,39 +119,80 @@ export class RbacBootstrapService {
   }
 
   /**
-   * Automatically assigns a system role (e.g. clinic_owner, admin, receptionist) into user_roles table.
+   * Automatically assigns a system role (e.g. clinic_owner, admin, receptionist, doctor) into user_roles table.
+   * Fully transaction-aware: uses the passed `tx` if available, or falls back to root `this.prisma`.
+   * Employs fast-path role lookup to eliminate redundant 5-query RBAC bootstrap on every call.
    */
   public async assignSystemRoleToUser(params: {
     userId: string;
     tenantId: string;
     roleName: string;
     clinicId?: string | null;
+    tx?: Prisma.TransactionClient;
   }): Promise<void> {
-    const { userId, tenantId, clinicId } = params;
+    const { userId, tenantId, clinicId, tx } = params;
+    const db = tx ?? this.prisma;
     let roleName = params.roleName || ROLE_CLINIC_OWNER;
 
-    // Ensure roles exist in DB
-    const roleIdMap = await this.ensureSystemRolesAndPermissions(tenantId);
+    // Fast path: find existing active role directly without heavy bootstrap
+    let role = await db.role.findFirst({
+      where: {
+        name: roleName,
+        OR: [{ tenantId }, { tenantId: null }],
+        deletedAt: null,
+        isActive: true,
+      },
+      orderBy: { tenantId: 'desc' }, // Prefer tenant-specific role if both exist
+    });
 
-    // Normalize role name if needed
-    let roleId = roleIdMap[roleName];
-    if (!roleId) {
-      // Fallback to clinic_owner or admin
-      roleId = roleIdMap[ROLE_CLINIC_OWNER] || roleIdMap[ROLE_ADMIN];
+    // Slow fallback: Only if role is missing in database (unseeded tenant)
+    if (!role) {
+      const roleIdMap = await this.ensureSystemRolesAndPermissions(tenantId, db);
+      const roleId = roleIdMap[roleName] || roleIdMap[ROLE_CLINIC_OWNER] || roleIdMap[ROLE_ADMIN];
+      if (roleId) {
+        role = await db.role.findUnique({ where: { id: roleId } });
+      }
     }
 
-    if (!roleId) return;
+    if (!role) return;
 
-    // Check existing assignment
-    const existing = await this.userRoleRepository.findActiveByUserAndRole(userId, roleId, tenantId);
-    if (!existing) {
-      await this.userRoleRepository.create({
+    // Deactivate any conflicting active roles for this user in this tenant
+    await db.userRole.updateMany({
+      where: {
         userId,
-        roleId,
+        tenantId,
+        roleId: { not: role.id },
+        isActive: true,
+      },
+      data: {
+        isActive: false,
+        revokedAt: new Date(),
+      },
+    });
+
+    // Atomic Role Assignment / Reactivation
+    await db.userRole.upsert({
+      where: {
+        userId_roleId_tenantId: {
+          userId,
+          roleId: role.id,
+          tenantId,
+        },
+      },
+      create: {
+        userId,
+        roleId: role.id,
         tenantId,
         clinicId: clinicId ?? null,
-      });
-    }
+        isActive: true,
+      },
+      update: {
+        isActive: true,
+        revokedAt: null,
+        expiresAt: null,
+        clinicId: clinicId !== undefined ? (clinicId ?? null) : undefined,
+      },
+    });
 
     // Invalidate permission cache
     this.cache.invalidateByUserId(userId);

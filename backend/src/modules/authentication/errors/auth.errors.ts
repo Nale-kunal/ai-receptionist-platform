@@ -278,3 +278,42 @@ export class InvitationActorInactiveError extends AuthError {
   }
 }
 
+export class InvitationNotFoundError extends AuthError {
+  constructor(id?: string) {
+    super(id ? `Invitation '${id}' not found.` : 'Invitation not found.', 'INVITATION_NOT_FOUND', 404);
+  }
+}
+
+export class InvitationNotResendableError extends AuthError {
+  constructor(status: string) {
+    super(
+      `Cannot resend invitation with status '${status}'. Only pending, viewed or expired invitations can be resent.`,
+      'INVITATION_NOT_RESENDABLE',
+      400,
+    );
+  }
+}
+
+export class InvitationEmailMismatchError extends AuthError {
+  constructor(invitedEmail: string, authenticatedEmail: string) {
+    super(
+      `This invitation was sent to ${invitedEmail}. You are currently signed in as ${authenticatedEmail}. Please sign in with the invited email address.`,
+      'INVITATION_EMAIL_MISMATCH',
+      403,
+    );
+  }
+}
+
+export class DatabaseTimeoutError extends AuthError {
+  constructor(message = 'The database transaction timed out. Please try again.') {
+    super(message, 'DATABASE_TIMEOUT', 503);
+  }
+}
+
+export class DatabaseError extends AuthError {
+  constructor(message = 'An unexpected database error occurred. Please try again.') {
+    super(message, 'DATABASE_ERROR', 500);
+  }
+}
+
+

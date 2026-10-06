@@ -23,6 +23,8 @@ import {
 
 import { appointmentCoordinator } from '../services/AppointmentRequestCoordinator';
 import { availabilityBus } from '../services/availabilityBus';
+import { APPOINTMENT_REASONS, getAppointmentReasonLabel } from '../constants/appointmentReasons';
+import { BookAppointmentModal } from '../components/BookAppointmentModal';
 
 export const Appointments: React.FC = () => {
   const [appointments, setAppointments] = useState<ApiAppointment[]>([]);
@@ -64,7 +66,9 @@ export const Appointments: React.FC = () => {
   const [bookingDoctorId, setBookingDoctorId] = useState('');
   const [bookingDate, setBookingDate] = useState('');
   const [bookingTime, setBookingTime] = useState('09:00');
-  const [appointmentType, setAppointmentType] = useState('checkup');
+  const [appointmentType, setAppointmentType] = useState('routine_checkup');
+  const [otherReason, setOtherReason] = useState('');
+  const [bookingNotes, setBookingNotes] = useState('');
   const [durationMinutes, setDurationMinutes] = useState(30);
 
   // Dynamic Doctor Availability Slots state
@@ -77,6 +81,8 @@ export const Appointments: React.FC = () => {
   const [rescheduleDuration, setRescheduleDuration] = useState(30);
   const [rescheduleAvailableSlots, setRescheduleAvailableSlots] = useState<Array<{ time: string; endTime: string; available: boolean; reason?: string; reasonCode?: string }>>([]);
   const [loadingRescheduleSlots, setLoadingRescheduleSlots] = useState<boolean>(false);
+  const [rescheduleStatus, setRescheduleStatus] = useState<string>('OPEN');
+  const [rescheduleMessage, setRescheduleMessage] = useState<string>('');
   const [availabilityRefreshKey, setAvailabilityRefreshKey] = useState<number>(0);
   const [cancellationReason, setCancellationReason] = useState('');
   const [createErrorMsg, setCreateErrorMsg] = useState<string | null>(null);
@@ -206,11 +212,14 @@ export const Appointments: React.FC = () => {
           durationMinutes: rescheduleDuration,
           excludeAppointmentId: selectedAppointment?.id,
         });
-        if (!isCancelled && res && Array.isArray(res.slots)) {
-          setRescheduleAvailableSlots(res.slots);
-          const isCurrentAvailable = res.slots.some((s: any) => s.time === rescheduleTime && s.available);
+        if (!isCancelled && res) {
+          const slots = Array.isArray(res.slots) ? res.slots : [];
+          setRescheduleAvailableSlots(slots);
+          setRescheduleStatus(res.status || (slots.length > 0 ? 'OPEN' : 'DOCTOR_SCHEDULE_CLOSED'));
+          setRescheduleMessage(res.message || '');
+          const isCurrentAvailable = slots.some((s: any) => s.time === rescheduleTime && s.available);
           if (!isCurrentAvailable) {
-            const firstOpen = res.slots.find((s: any) => s.available);
+            const firstOpen = slots.find((s: any) => s.available);
             if (firstOpen) {
               setRescheduleTime(firstOpen.time);
             }
@@ -219,6 +228,7 @@ export const Appointments: React.FC = () => {
       } catch (err) {
         console.warn('Could not fetch reschedule availability slots:', err);
         setRescheduleAvailableSlots([]);
+        setRescheduleMessage('Unable to load available times. Please try again.');
       } finally {
         if (!isCancelled) setLoadingRescheduleSlots(false);
       }
@@ -297,7 +307,9 @@ export const Appointments: React.FC = () => {
     const dateStr = tomorrow.toISOString().split('T')[0] || '';
     setBookingDate(dateStr);
     setBookingTime('09:00');
-    setAppointmentType('checkup');
+    setAppointmentType('routine_checkup');
+    setOtherReason('');
+    setBookingNotes('');
     setDurationMinutes(30);
     setErrorMsg(null);
     setCreateErrorMsg(null);
@@ -313,6 +325,19 @@ export const Appointments: React.FC = () => {
     setErrorMsg(null);
     setCreateErrorMsg(null);
     setBookingEmailConflict(null);
+
+    // Validation
+    if (!appointmentType) {
+      setCreateErrorMsg('Please select an appointment reason.');
+      setSubmitting(false);
+      return;
+    }
+
+    if (appointmentType === 'other' && !otherReason.trim()) {
+      setCreateErrorMsg('Please specify the reason when selecting "Other".');
+      setSubmitting(false);
+      return;
+    }
 
     try {
       let patient: { id?: string; name: string; phone: string };
@@ -359,6 +384,8 @@ export const Appointments: React.FC = () => {
       if (!doctor) throw new Error('Selected doctor could not be resolved.');
 
       await api.createAppointment({
+        patientId: patient.id,
+        doctorId: doctor.id,
         patientName: patient.name,
         patientPhone: patient.phone,
         doctorName: doctor.name,
@@ -366,6 +393,8 @@ export const Appointments: React.FC = () => {
         time: bookingTime,
         status: 'scheduled',
         appointmentType,
+        otherReason: appointmentType === 'other' ? otherReason.trim() : undefined,
+        notes: bookingNotes.trim() || undefined,
         durationMinutes,
       });
 
@@ -377,14 +406,20 @@ export const Appointments: React.FC = () => {
     } catch (err: any) {
       console.error('Booking failed:', err);
       const errData = err.response?.data?.error;
-      let msg = errData?.message || err.message || 'Scheduling conflict or validation error. Please select another time slot.';
-      if (errData?.details && Array.isArray(errData.details) && errData.details.length > 0) {
-        const detailMsgs = errData.details
-          .map((d: any) => (typeof d === 'string' ? d : d.message ? `${d.field ? d.field + ': ' : ''}${d.message}` : JSON.stringify(d)))
-          .join(', ');
-        if (detailMsgs) msg = `${msg}: ${detailMsgs}`;
+      const status = err.response?.status;
+      if (status === 409 || errData?.code === 'APPOINTMENT_CONFLICT' || errData?.code === 'APPOINTMENT_SLOT_TAKEN') {
+        setCreateErrorMsg('This time slot is no longer available. Please select another available time.');
+        availabilityBus.publish();
+      } else {
+        let msg = errData?.message || err.message || 'Scheduling conflict or validation error. Please select another time slot.';
+        if (errData?.details && Array.isArray(errData.details) && errData.details.length > 0) {
+          const detailMsgs = errData.details
+            .map((d: any) => (typeof d === 'string' ? d : d.message ? `${d.field ? d.field + ': ' : ''}${d.message}` : JSON.stringify(d)))
+            .join(', ');
+          if (detailMsgs) msg = `${msg}: ${detailMsgs}`;
+        }
+        setCreateErrorMsg(msg);
       }
-      setCreateErrorMsg(msg);
     } finally {
       setSubmitting(false);
     }
@@ -401,6 +436,10 @@ export const Appointments: React.FC = () => {
     try {
       if (targetStatus === 'confirmed') {
         await api.confirmAppointment(apt.id);
+      } else if (targetStatus === 'checked_in') {
+        await api.checkInAppointment(apt.id);
+      } else if (targetStatus === 'in_progress') {
+        await api.startAppointment(apt.id);
       } else if (targetStatus === 'completed') {
         await api.completeAppointment(apt.id);
       } else {
@@ -693,7 +732,7 @@ export const Appointments: React.FC = () => {
                       display: 'inline-block',
                     }}
                   >
-                    {apt.appointmentType || 'checkup'}
+                    {getAppointmentReasonLabel(apt.appointmentType)}
                   </span>
                 </td>
                 <td style={{ whiteSpace: 'nowrap' }}>{renderStatusBadge(apt.status)}</td>
@@ -751,7 +790,7 @@ export const Appointments: React.FC = () => {
                       </Button>
                     )}
 
-                    {(apt.status === 'in_progress' || apt.status === 'confirmed') && (
+                    {apt.status === 'in_progress' && (
                       <Button
                         variant="secondary"
                         onClick={() => handleStatusTransition(apt, 'completed')}
@@ -855,314 +894,15 @@ export const Appointments: React.FC = () => {
         )}
       </Card>
 
-      {/* Book New Appointment Modal */}
-      <Modal
+      {/* Book New Appointment Modal (Unified Standard UI/UX) */}
+      <BookAppointmentModal
         isOpen={showCreateModal}
         onClose={() => setShowCreateModal(false)}
-        title="Book Enterprise Patient Appointment"
-        maxWidth="680px"
-      >
-        <form onSubmit={handleBookAppointment} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {createErrorMsg && !bookingEmailConflict && (
-            <div
-              style={{
-                padding: '12px 16px',
-                backgroundColor: 'rgba(239, 68, 68, 0.12)',
-                border: '1px solid var(--error, #ef4444)',
-                borderRadius: '8px',
-                color: '#f87171',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '10px',
-                fontSize: '13px',
-                fontWeight: 500,
-              }}
-            >
-              <AlertCircle size={16} color="#f87171" style={{ flexShrink: 0 }} />
-              <span>{createErrorMsg}</span>
-            </div>
-          )}
-
-          {bookingEmailConflict && (
-            <div
-              style={{
-                padding: '14px 16px',
-                backgroundColor: 'rgba(245, 158, 11, 0.12)',
-                border: '1px solid var(--warning, #f59e0b)',
-                borderRadius: '8px',
-                color: 'var(--text-primary)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '12px',
-                fontSize: '13px',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
-                <AlertTriangle size={20} color="#f59e0b" style={{ flexShrink: 0, marginTop: '2px' }} />
-                <div>
-                  <p style={{ fontWeight: 600, margin: '0 0 4px', color: 'var(--text-primary)' }}>
-                    Email Already Associated With Another Person
-                  </p>
-                  <p style={{ margin: 0, lineHeight: 1.4, color: 'var(--text-secondary)' }}>
-                    The email <strong style={{ color: 'var(--text-primary)' }}>{bookingEmailConflict.email}</strong> is already registered under patient:{' '}
-                    <strong style={{ color: 'var(--primary)' }}>{bookingEmailConflict.existingPatientName}</strong>.
-                  </p>
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  style={{ fontSize: '12px', padding: '6px 12px' }}
-                  onClick={() => {
-                    setNewPatientForm((prev) => ({ ...prev, email: '' }));
-                    setBookingEmailConflict(null);
-                  }}
-                >
-                  Continue with another email
-                </Button>
-                <Button
-                  type="button"
-                  style={{ fontSize: '12px', padding: '6px 12px' }}
-                  onClick={(e) => handleBookAppointment(e as any, true)}
-                >
-                  Continue Anyway
-                </Button>
-              </div>
-            </div>
-          )}
-          <div>
-            <label style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px', display: 'block' }}>
-              Patient Record
-            </label>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button
-                type="button"
-                onClick={() => setBookingType('existing')}
-                style={{
-                  flex: 1,
-                  padding: '8px 12px',
-                  borderRadius: '6px',
-                  fontSize: '13px',
-                  fontWeight: 500,
-                  border: bookingType === 'existing' ? '1px solid var(--primary)' : '1px solid var(--border-color)',
-                  backgroundColor: bookingType === 'existing' ? 'var(--primary-light)' : 'var(--bg-secondary)',
-                  color: bookingType === 'existing' ? 'var(--primary)' : 'var(--text-primary)',
-                  cursor: 'pointer',
-                }}
-              >
-                Select Existing Patient
-              </button>
-              <button
-                type="button"
-                onClick={() => setBookingType('new')}
-                style={{
-                  flex: 1,
-                  padding: '8px 12px',
-                  borderRadius: '6px',
-                  fontSize: '13px',
-                  fontWeight: 500,
-                  border: bookingType === 'new' ? '1px solid var(--primary)' : '1px solid var(--border-color)',
-                  backgroundColor: bookingType === 'new' ? 'var(--primary-light)' : 'var(--bg-secondary)',
-                  color: bookingType === 'new' ? 'var(--primary)' : 'var(--text-primary)',
-                  cursor: 'pointer',
-                }}
-              >
-                + Register New Patient
-              </button>
-            </div>
-          </div>
-
-          {bookingType === 'existing' ? (
-            <div>
-              <label style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px', display: 'block' }}>
-                Choose Patient *
-              </label>
-              <select
-                value={selectedPatientId}
-                onChange={(e) => setSelectedPatientId(e.target.value)}
-                className="input"
-                required
-              >
-                {patients.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.phone})
-                  </option>
-                ))}
-              </select>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <Input
-                  label="First Name *"
-                  required
-                  value={newPatientForm.firstName}
-                  onChange={(e) => setNewPatientForm({ ...newPatientForm, firstName: e.target.value })}
-                />
-                <Input
-                  label="Last Name"
-                  value={newPatientForm.lastName}
-                  onChange={(e) => setNewPatientForm({ ...newPatientForm, lastName: e.target.value })}
-                />
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <Input
-                  label="Primary Phone (10 digits) *"
-                  required
-                  placeholder="9876543210"
-                  maxLength={10}
-                  value={newPatientForm.phone}
-                  onChange={(e) => setNewPatientForm({ ...newPatientForm, phone: e.target.value.replace(/\D/g, '').slice(0, 10) })}
-                />
-                <Input
-                  type="date"
-                  label="Date of Birth"
-                  value={newPatientForm.dob}
-                  onChange={(e) => setNewPatientForm({ ...newPatientForm, dob: e.target.value })}
-                />
-              </div>
-              <Input
-                type="email"
-                label="Email Address"
-                value={newPatientForm.email}
-                onChange={(e) => setNewPatientForm({ ...newPatientForm, email: e.target.value })}
-              />
-            </div>
-          )}
-
-          <div>
-            <label style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px', display: 'block' }}>
-              Assigned Doctor / Practitioner *
-            </label>
-            <select
-              value={bookingDoctorId}
-              onChange={(e) => setBookingDoctorId(e.target.value)}
-              className="input"
-              required
-            >
-              {doctors.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name} ({(d as any).specialization || 'General Dentistry'})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
-            <div>
-              <Input
-                type="date"
-                label="Appointment Date *"
-                required
-                value={bookingDate}
-                onChange={(e) => setBookingDate(e.target.value)}
-              />
-            </div>
-            <div>
-              <label style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px', display: 'block' }}>
-                Appointment Type
-              </label>
-              <select
-                value={appointmentType}
-                onChange={(e) => setAppointmentType(e.target.value)}
-                className="input"
-              >
-                <option value="checkup">Regular Checkup</option>
-                <option value="consultation">Initial Consultation</option>
-                <option value="emergency">Emergency / Toothache</option>
-                <option value="whitening">Teeth Whitening</option>
-                <option value="root_canal">Root Canal Procedure</option>
-                <option value="orthodontics">Orthodontic Adjustment</option>
-              </select>
-            </div>
-            <div>
-              <label style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px', display: 'block' }}>
-                Duration (Minutes) *
-              </label>
-              <select
-                value={durationMinutes}
-                onChange={(e) => setDurationMinutes(Number(e.target.value))}
-                className="input"
-              >
-                <option value={15}>15 Minutes</option>
-                <option value={30}>30 Minutes</option>
-                <option value={45}>45 Minutes</option>
-                <option value={60}>60 Minutes (1 Hour)</option>
-                <option value={90}>90 Minutes (1.5 Hours)</option>
-                <option value={120}>120 Minutes (2 Hours)</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Dynamic Practitioner Availability Time Slots */}
-          {bookingDoctorId && bookingDate && (
-            <div style={{ marginTop: '4px' }}>
-              <label style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>Practitioner Available Time Slots</span>
-                {loadingSlots && <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Checking schedule...</span>}
-              </label>
-
-              {availableSlots.length > 0 ? (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px', maxHeight: '160px', overflowY: 'auto', padding: '4px' }}>
-                  {availableSlots.map((slot) => {
-                    const isSelected = bookingTime === slot.time;
-                    return (
-                      <button
-                        key={slot.time}
-                        type="button"
-                        disabled={!slot.available}
-                        title={slot.available ? `Available slot (${slot.time} - ${slot.endTime})` : `Unavailable: ${slot.reason || 'Already booked or outside working hours'}`}
-                        onClick={() => setBookingTime(slot.time)}
-                        style={{
-                          padding: '6px 8px',
-                          borderRadius: '4px',
-                          fontSize: '12px',
-                          fontWeight: isSelected ? 600 : 400,
-                          border: isSelected
-                            ? '1.5px solid var(--primary)'
-                            : slot.available
-                            ? '1px solid var(--border-color)'
-                            : '1px solid transparent',
-                          backgroundColor: isSelected
-                            ? 'var(--primary-light, rgba(99, 102, 241, 0.15))'
-                            : slot.available
-                            ? 'var(--bg-secondary)'
-                            : 'var(--bg-tertiary, rgba(255,255,255,0.04))',
-                          color: isSelected
-                            ? 'var(--primary)'
-                            : slot.available
-                            ? 'var(--text-primary)'
-                            : 'var(--text-muted)',
-                          cursor: slot.available ? 'pointer' : 'not-allowed',
-                          opacity: slot.available ? 1 : 0.45,
-                          textDecoration: slot.available ? 'none' : 'line-through',
-                          transition: 'all 0.15s ease',
-                        }}
-                      >
-                        {slot.time}
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0, fontStyle: 'italic' }}>
-                  {loadingSlots ? 'Loading doctor availability...' : 'No open slots on selected date (Dentist closed or on leave).'}
-                </p>
-              )}
-            </div>
-          )}
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '12px' }}>
-            <Button type="button" variant="secondary" onClick={() => setShowCreateModal(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary" disabled={submitting}>
-              {submitting ? 'Creating Appointment...' : 'Confirm & Schedule'}
-            </Button>
-          </div>
-        </form>
-      </Modal>
+        onSuccess={async () => {
+          appointmentCoordinator.invalidateCache();
+          await loadData();
+        }}
+      />
 
       {/* Reschedule Appointment Modal */}
       <Modal
@@ -1275,7 +1015,17 @@ export const Appointments: React.FC = () => {
               </div>
             ) : (
               <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0, fontStyle: 'italic' }}>
-                No open slots available on selected date (Practitioner closed or fully booked).
+                {loadingRescheduleSlots
+                  ? 'Loading practitioner availability...'
+                  : rescheduleStatus === 'DOCTOR_SCHEDULE_CLOSED'
+                  ? 'This dentist is not working on this date.'
+                  : rescheduleStatus === 'DOCTOR_ON_LEAVE'
+                  ? 'This dentist is on leave on this date.'
+                  : rescheduleStatus === 'CLINIC_CLOSED'
+                  ? 'Clinic is closed on this date.'
+                  : rescheduleStatus === 'NO_AVAILABLE_SLOTS'
+                  ? 'No available appointment slots for this doctor on this date.'
+                  : rescheduleMessage || 'No open slots available on selected date.'}
               </p>
             )}
           </div>

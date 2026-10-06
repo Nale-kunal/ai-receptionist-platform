@@ -197,8 +197,15 @@ describe('Live End-to-End Notification & Delivery Integration Audit', () => {
   it('6. should trigger email notification and persist DB record on User Removal', async () => {
     await userService.deleteUser(memberId, tenantId, ownerId);
 
-    const ntf = await waitForDeliveredNotification({ tenantId, recipient: `member-${timestamp}@example.com`, subject: { contains: 'membership update' } });
+    const ntf = await waitForDeliveredNotification({ tenantId, recipient: `member-${timestamp}@example.com`, subject: { contains: 'revoked' } });
     expect(ntf).not.toBeNull();
     expect(ntf?.status).toBe('delivered');
   }, 20000);
+
+  afterAll(async () => {
+    await mailQueue.shutdown();
+    const { cleanupTestTenant } = await import('../../../shared/database/test-teardown');
+    await cleanupTestTenant(tenantId, prisma);
+    await prisma.$disconnect();
+  });
 });

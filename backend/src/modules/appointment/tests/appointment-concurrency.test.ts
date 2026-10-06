@@ -15,6 +15,15 @@ describe('Appointment Concurrency & Double-Booking Protection', () => {
       clinicIsActive: jest.fn().mockResolvedValue(true),
       doctorBelongsToClinic: jest.fn().mockResolvedValue(true),
       getDoctorStatus: jest.fn().mockResolvedValue('active'),
+      getDoctorDetails: jest.fn().mockResolvedValue({
+        id: 'doctor-1',
+        status: 'active',
+        workingHours: [
+          { dayOfWeek: 6, openTime: '09:00', closeTime: '17:00', breakStart: '12:00', breakEnd: '13:00', isClosed: false },
+        ],
+        leaves: [],
+        clinic: { id: 'clinic-1', timezone: 'UTC' },
+      }),
       patientBelongsToClinic: jest.fn().mockResolvedValue(true),
       getPatientStatus: jest.fn().mockResolvedValue('active'),
       findConflicts: jest.fn(),

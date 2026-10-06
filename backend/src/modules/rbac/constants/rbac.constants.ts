@@ -260,6 +260,7 @@ export const CLINIC_MANAGER_PERMISSIONS: readonly PermissionName[] = [
 
 /** 6. Dentist / Doctor — Clinical & Patient Care */
 export const DOCTOR_PERMISSIONS: readonly PermissionName[] = [
+  PERM_CLINIC_READ,
   PERM_APPOINTMENT_READ, PERM_APPOINTMENT_UPDATE,
   PERM_PATIENT_READ, PERM_PATIENT_UPDATE,
   PERM_CONVERSATION_SUMMARY,

@@ -10,8 +10,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +110,10 @@ model User {
   updatedAt DateTime  @updatedAt      @map("updated_at")
   deletedAt DateTime? @map("deleted_at")
 
+  revokedAt        DateTime? @map("revoked_at")
+  revokedByUserId  String?   @map("revoked_by_user_id") @db.Uuid
+  revocationReason String?   @map("revocation_reason") @db.Text
+
   tenant  Tenant    @relation(fields: [tenantId], references: [id])
   clinic  Clinic?   @relation("ClinicStaff", fields: [clinicId], references: [id])
   ownedClinics Clinic[] @relation("ClinicOwner")
@@ -121,6 +126,7 @@ model User {
   @@index([email])
   @@index([tenantId])
   @@index([tenantId, deletedAt, status])
+  @@index([tenantId, revokedAt])
   @@map("users")
 }
 
@@ -223,6 +229,7 @@ model Invitation {
   viewedAt        DateTime? @map("viewed_at")
   acceptedAt      DateTime? @map("accepted_at")
   declinedAt      DateTime? @map("declined_at")
+  declineReason   String?   @map("decline_reason") @db.Text
   resentAt        DateTime? @map("resent_at")
   revokedAt       DateTime? @map("revoked_at")
   usedAt          DateTime? @map("used_at")
@@ -333,6 +340,8 @@ model UserRole {
   @@index([userId])
   @@index([roleId])
   @@index([tenantId])
+  @@index([userId, tenantId, isActive])
+  @@index([tenantId, roleId, isActive])
   @@map("user_roles")
 }
 
@@ -402,6 +411,8 @@ model Configuration {
   @@index([tenantId])
   @@index([clinicId])
   @@index([isActive])
+  @@index([tenantId, clinicId, isActive])
+  @@index([tenantId, isActive])
   @@map("configurations")
 }
 
@@ -506,6 +517,8 @@ model Doctor {
   @@index([displayName])
   @@index([specialization])
   @@index([tenantId, deletedAt])
+  @@index([tenantId, deletedAt, status])
+  @@index([tenantId, clinicId, deletedAt])
   @@map("doctors")
 }
 
@@ -555,6 +568,10 @@ model Patient {
   @@index([mrn])
   @@index([email])
   @@index([tenantId, deletedAt])
+  @@index([tenantId, deletedAt, createdAt(sort: Desc)])
+  @@index([tenantId, clinicId, deletedAt])
+  @@index([tenantId, phone])
+  @@index([tenantId, email])
   @@map("patients")
 }
 
@@ -607,6 +624,9 @@ model Appointment {
   // Composite indexes for scheduling and dashboard queries
   @@index([tenantId, deletedAt, startTime])
   @@index([tenantId, status])
+  @@index([tenantId, deletedAt, status, startTime])
+  @@index([tenantId, clinicId, status, startTime])
+  @@index([tenantId, doctorId, startTime])
   @@index([doctorId, startTime])
   @@index([doctorId, startTime, endTime, status])
   @@index([clinicId, startTime])
@@ -1078,16 +1098,17 @@ model WhatsAppIntegration {
 
   // Meta phone number identity
   phoneNumber      String    @unique @map("phone_number")  // E.164, e.g. +14155552671 — UNIQUE enforces 1 clinic per number
-  phoneNumberId    String    @map("phone_number_id")       // Meta phone number ID
+  phoneNumberId    String    @unique @map("phone_number_id") // Meta phone number ID — UNIQUE enforces 1 clinic per Meta Phone Number
   wabaId           String    @map("waba_id")               // WhatsApp Business Account ID
   displayName      String    @map("display_name")
 
   // Lifecycle
   status           String    @default("inactive")  // 'active' | 'inactive' | 'suspended'
   isEnabled        Boolean   @default(false) @map("is_enabled")
+  wabaSubscribed   Boolean   @default(false) @map("waba_subscribed") // WABA webhook subscription status
 
-  // Webhook verification token (plaintext — used only for Meta GET handshake, not a security secret)
-  webhookVerifyToken String  @map("webhook_verify_token")
+  // Optional legacy token field (Option A: platform webhook verification uses WHATSAPP_WEBHOOK_VERIFY_TOKEN env var)
+  webhookVerifyToken String? @map("webhook_verify_token")
 
   // Bot / AI configuration for this number
   // Stored as JSON: { greeting, personality, bookingEnabled, rescheduleEnabled, cancelEnabled,
@@ -1108,6 +1129,8 @@ model WhatsAppIntegration {
   @@index([clinicId])
   @@index([tenantId, clinicId])
   @@index([phoneNumber])
+  @@index([phoneNumberId])
+  @@index([wabaId])
   @@index([status])
   @@index([isEnabled])
   @@map("whatsapp_integrations")

@@ -145,24 +145,19 @@ export class CalendarController {
 
       // 2. Healthcare Dynamic Availability Engine (doctor & date search interface)
       if (doctorId && date) {
-        // Lazy-load AvailabilityService and PrismaClient (safe singleton pattern)
+        // Lazy-load AvailabilityService with shared Prisma singleton
         let availabilityService = (this.calendarService as any).availabilityService;
         if (!availabilityService) {
           const { AvailabilityService } = require('../services/availability.service');
-          const { PrismaClient } = require('@prisma/client');
-          // Use a module-level singleton to avoid connection pool exhaustion
-          if (!(global as any).__calendarPrisma) {
-            (global as any).__calendarPrisma = new PrismaClient();
-          }
-          availabilityService = new AvailabilityService((global as any).__calendarPrisma);
+          const { prisma } = require('../../../shared/database/prisma');
+          availabilityService = new AvailabilityService(prisma);
           (this.calendarService as any).availabilityService = availabilityService;
         }
 
         // Fetch clinic-level business hours from configuration (non-blocking — safe fallback)
         let clinicBusinessHours: Array<{ dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }> | undefined;
         try {
-          const { PrismaClient } = require('@prisma/client');
-          const prisma: any = (global as any).__calendarPrisma || new PrismaClient();
+          const { prisma } = require('../../../shared/database/prisma');
 
           const clinicId = req.user?.clinicId ?? null;
 
@@ -217,7 +212,7 @@ export class CalendarController {
           excludeUnavailable: excludeUnavailable === 'true',
           stepMinutes: stepMinutes ? parseInt(stepMinutes, 10) : 30,
           bufferMinutes: bufferMinutes ? parseInt(bufferMinutes, 10) : 0,
-          timezone: (req.query.timezone as string) || (req.query.timeZone as string) || 'UTC',
+          timezone: (req.query.timezone as string) || (req.query.timeZone as string) || undefined,
           clinicBusinessHours,
         });
         sendSuccess(res, result);

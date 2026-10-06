@@ -28,12 +28,17 @@ export const Modal: React.FC<ModalProps> = ({
         left: 0,
         right: 0,
         bottom: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.5)',
+        backgroundColor: 'rgba(0, 0, 0, 0.65)',
+        backdropFilter: 'blur(3px)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         zIndex: 1000,
         padding: '16px',
+        overflowY: 'auto',
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
       }}
     >
       <div
@@ -41,30 +46,55 @@ export const Modal: React.FC<ModalProps> = ({
         style={{
           width: '100%',
           maxWidth,
-          boxShadow: 'var(--shadow-lg)',
-          animation: 'modal-appear 0.2s ease-out',
-          maxHeight: '90vh',
-          overflowY: 'auto',
+          boxShadow: 'var(--shadow-lg, 0 20px 25px -5px rgba(0, 0, 0, 0.5))',
+          animation: 'modal-appear 0.15s ease-out',
+          maxHeight: 'calc(100vh - 32px)',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+          padding: 0,
+          margin: 'auto',
         }}
       >
-        <div className="flex items-center justify-between mb-4" style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '12px' }}>
-          <h3>{title}</h3>
+        <div
+          className="flex items-center justify-between"
+          style={{
+            borderBottom: '1px solid var(--border-color)',
+            padding: '12px 18px',
+            backgroundColor: 'var(--bg-primary)',
+            flexShrink: 0,
+          }}
+        >
+          <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 600 }}>{title}</h3>
           <button
             onClick={onClose}
             style={{
               background: 'none',
               border: 'none',
               fontSize: '1.25rem',
+              lineHeight: 1,
               color: 'var(--text-secondary)',
               cursor: 'pointer',
+              padding: '2px 6px',
+              borderRadius: '4px',
             }}
           >
             &times;
           </button>
         </div>
-        <div>{children}</div>
+        <div style={{ padding: '16px 18px', overflowY: 'auto', flex: 1 }}>
+          {children}
+        </div>
         {!hideFooterCancel && (
-          <div className="flex justify-end gap-2" style={{ marginTop: '16px' }}>
+          <div
+            className="flex justify-end gap-2"
+            style={{
+              borderTop: '1px solid var(--border-color)',
+              padding: '10px 18px',
+              backgroundColor: 'var(--bg-primary)',
+              flexShrink: 0,
+            }}
+          >
             <Button variant="secondary" onClick={onClose}>
               Cancel
             </Button>

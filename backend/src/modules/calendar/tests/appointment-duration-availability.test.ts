@@ -134,4 +134,98 @@ describe('AvailabilityService — Duration-Aware & Continuous Scanning', () => {
     expect(result.slots.every((s) => s.available === true)).toBe(true);
     expect(result.slots.find((s) => s.time === '09:00')).toBeUndefined();
   });
+
+  it('should generate Saturday availability slots for doctor even when clinic is closed on Saturday', async () => {
+    mockPrisma.doctor.findFirst.mockResolvedValue({
+      id: 'doc-1',
+      tenantId: 'tenant-1',
+      status: 'active',
+      workingHours: [
+        { dayOfWeek: 6, startTime: '09:00', endTime: '17:00', breakStart: '12:00', breakEnd: '13:00', isClosed: false },
+      ],
+      leaves: [],
+    });
+
+    mockPrisma.appointment.findMany.mockResolvedValue([]);
+
+    const clinicBusinessHours = [
+      { dayOfWeek: 6, openTime: '09:00', closeTime: '14:00', isClosed: true }, // Clinic is closed
+    ];
+
+    const result = await service.getAvailableSlots({
+      tenantId: 'tenant-1',
+      doctorId: 'doc-1',
+      date: '2026-09-12', // Saturday
+      durationMinutes: 30,
+      clinicBusinessHours,
+    });
+
+    expect(result.isOpen).toBe(true);
+    expect(result.status).toBe('OPEN');
+    expect(result.message).toBe('Slots available');
+    expect(result.slots.length).toBeGreaterThan(0);
+
+    // 09:00 is available
+    const slot0900 = result.slots.find((s) => s.time === '09:00');
+    expect(slot0900?.available).toBe(true);
+
+    // 12:00 is unavailable due to lunch break
+    const slot1200 = result.slots.find((s) => s.time === '12:00');
+    expect(slot1200?.available).toBe(false);
+    expect(slot1200?.reasonCode).toBe('DOCTOR_BREAK');
+
+    // 13:00 is available after lunch
+    const slot1300 = result.slots.find((s) => s.time === '13:00');
+    expect(slot1300?.available).toBe(true);
+  });
+
+  it('should return DOCTOR_SCHEDULE_CLOSED and zero slots when doctor is closed on selected date', async () => {
+    mockPrisma.doctor.findFirst.mockResolvedValue({
+      id: 'doc-1',
+      tenantId: 'tenant-1',
+      status: 'active',
+      workingHours: [
+        { dayOfWeek: 0, isClosed: true }, // Sunday closed
+      ],
+      leaves: [],
+    });
+
+    const result = await service.getAvailableSlots({
+      tenantId: 'tenant-1',
+      doctorId: 'doc-1',
+      date: '2026-09-13', // Sunday
+      durationMinutes: 30,
+    });
+
+    expect(result.isOpen).toBe(false);
+    expect(result.status).toBe('DOCTOR_SCHEDULE_CLOSED');
+    expect(result.message).toBe('This dentist is not working on this date.');
+    expect(result.slots.length).toBe(0);
+  });
+
+  it('should return DOCTOR_ON_LEAVE and zero slots when doctor is on leave on selected date', async () => {
+    mockPrisma.doctor.findFirst.mockResolvedValue({
+      id: 'doc-1',
+      tenantId: 'tenant-1',
+      status: 'active',
+      workingHours: [
+        { dayOfWeek: 1, startTime: '09:00', endTime: '17:00', isClosed: false },
+      ],
+      leaves: [
+        { date: '2026-09-14' },
+      ],
+    });
+
+    const result = await service.getAvailableSlots({
+      tenantId: 'tenant-1',
+      doctorId: 'doc-1',
+      date: '2026-09-14', // Monday
+      durationMinutes: 30,
+    });
+
+    expect(result.isOpen).toBe(false);
+    expect(result.status).toBe('DOCTOR_ON_LEAVE');
+    expect(result.message).toBe('This dentist is on leave on this date.');
+    expect(result.slots.length).toBe(0);
+  });
 });

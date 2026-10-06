@@ -83,6 +83,130 @@ describe('CreateAppointmentSchema', () => {
     const result = CreateAppointmentSchema.safeParse({ ...valid, source: 'unknown_source' });
     expect(result.success).toBe(false);
   });
+
+  describe('Appointment Reason & appointmentType validation', () => {
+    it('should default appointmentType to "routine_checkup" when omitted', () => {
+      const result = CreateAppointmentSchema.safeParse(valid);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.appointmentType).toBe('routine_checkup');
+      }
+    });
+
+    it('should accept canonical dental reasons', () => {
+      const canonicals = [
+        'routine_checkup',
+        'cleaning',
+        'tooth_pain',
+        'emergency',
+        'consultation',
+        'root_canal',
+        'wisdom_tooth',
+        'crown_bridge',
+        'implant_consultation',
+        'orthodontic',
+      ];
+      for (const reason of canonicals) {
+        const result = CreateAppointmentSchema.safeParse({ ...valid, appointmentType: reason });
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.data.appointmentType).toBe(reason);
+        }
+      }
+    });
+
+    it('should accept and normalize legacy reason aliases', () => {
+      const legacyAliases: Record<string, string> = {
+        checkup: 'routine_checkup',
+        whitening: 'cosmetic',
+        orthodontics: 'orthodontic',
+      };
+      for (const [alias, expected] of Object.entries(legacyAliases)) {
+        const result = CreateAppointmentSchema.safeParse({ ...valid, appointmentType: alias });
+        expect(result.success).toBe(true);
+        if (result.success) {
+          expect(result.data.appointmentType).toBe(expected);
+        }
+      }
+    });
+
+    it('should accept reason field as alias for appointmentType', () => {
+      const result = CreateAppointmentSchema.safeParse({ ...valid, reason: 'tooth_pain' });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.appointmentType).toBe('tooth_pain');
+      }
+    });
+
+    it('should reject unsupported appointmentType', () => {
+      const result = CreateAppointmentSchema.safeParse({ ...valid, appointmentType: 'unsupported_random_reason' });
+      expect(result.success).toBe(false);
+    });
+
+    it('should accept "other" when otherReason is provided', () => {
+      const result = CreateAppointmentSchema.safeParse({
+        ...valid,
+        appointmentType: 'other',
+        otherReason: 'Patient wants second opinion on veneer color match',
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.appointmentType).toBe('other');
+        expect(result.data.otherReason).toBe('Patient wants second opinion on veneer color match');
+      }
+    });
+
+    it('should accept "other" via reasonDetails when appointmentType is "other"', () => {
+      const result = CreateAppointmentSchema.safeParse({
+        ...valid,
+        appointmentType: 'other',
+        reasonDetails: 'Custom procedure details from AI WhatsApp chat',
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.appointmentType).toBe('other');
+        expect(result.data.otherReason).toBe('Custom procedure details from AI WhatsApp chat');
+      }
+    });
+
+    it('should reject "other" when otherReason is omitted', () => {
+      const result = CreateAppointmentSchema.safeParse({
+        ...valid,
+        appointmentType: 'other',
+      });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        const hasOtherReasonError = result.error.issues.some((i: any) => i.path.includes('otherReason'));
+        expect(hasOtherReasonError).toBe(true);
+      }
+    });
+
+    it('should reject "other" when otherReason is empty string', () => {
+      const result = CreateAppointmentSchema.safeParse({
+        ...valid,
+        appointmentType: 'other',
+        otherReason: '',
+      });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        const hasOtherReasonError = result.error.issues.some((i: any) => i.path.includes('otherReason'));
+        expect(hasOtherReasonError).toBe(true);
+      }
+    });
+
+    it('should reject "other" when otherReason is whitespace only', () => {
+      const result = CreateAppointmentSchema.safeParse({
+        ...valid,
+        appointmentType: 'other',
+        otherReason: '    ',
+      });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        const hasOtherReasonError = result.error.issues.some((i: any) => i.path.includes('otherReason'));
+        expect(hasOtherReasonError).toBe(true);
+      }
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

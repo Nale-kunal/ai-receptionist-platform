@@ -67,6 +67,14 @@ export class HealthController {
           authEngine: {
             status: 'healthy',
           },
+          whatsapp: {
+            status: (process.env['WHATSAPP_ACCESS_TOKEN'] && process.env['WHATSAPP_APP_SECRET'] && process.env['WHATSAPP_WEBHOOK_VERIFY_TOKEN'])
+              ? 'configured'
+              : 'missing',
+            provider: (process.env['NODE_ENV'] === 'production' || process.env['WHATSAPP_ACCESS_TOKEN'])
+              ? 'meta-cloud'
+              : 'dev-no-op',
+          },
         },
         memory: {
           heapUsedMb: Math.round((mem.heapUsed / 1024 / 1024) * 100) / 100,
@@ -79,6 +87,58 @@ export class HealthController {
       res.status(statusCode).json({
         success: dbHealthy,
         data: healthData,
+        requestId: req.requestId || '',
+      });
+    } catch (err) {
+      next(err);
+    }
+  };
+
+  public getWhatsAppHealth = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const accessToken = process.env['WHATSAPP_ACCESS_TOKEN'];
+      const appSecret = process.env['WHATSAPP_APP_SECRET'];
+      const verifyToken = process.env['WHATSAPP_WEBHOOK_VERIFY_TOKEN'];
+      const apiVersion = process.env['WHATSAPP_API_VERSION'] || 'v21.0';
+
+      const isConfigured = Boolean(accessToken && appSecret && verifyToken);
+      const isProd = process.env['NODE_ENV'] === 'production';
+      const provider = (isProd || accessToken) ? 'meta-cloud' : 'dev-no-op';
+
+      let connectivity: 'healthy' | 'failed' | 'unknown' = 'unknown';
+
+      if (accessToken) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3500);
+          const metaRes = await fetch(`https://graph.facebook.com/${apiVersion}/me`, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              Accept: 'application/json',
+            },
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+
+          if (metaRes.ok) {
+            connectivity = 'healthy';
+          } else {
+            connectivity = 'failed';
+          }
+        } catch {
+          connectivity = 'failed';
+        }
+      }
+
+      res.status(200).json({
+        success: true,
+        data: {
+          configuration: isConfigured ? 'configured' : 'missing',
+          provider,
+          connectivity,
+          apiVersion,
+        },
         requestId: req.requestId || '',
       });
     } catch (err) {

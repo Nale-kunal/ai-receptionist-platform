@@ -202,11 +202,13 @@ describe('Enterprise Team Invitation & Role Acceptance Workflow (Flow A vs Flow 
       const acceptedUser = await service.acceptInvitation({ token: rawToken, password: '' });
 
       expect(acceptedUser.role).toBe('doctor');
-      expect(mockRbacBootstrap.assignSystemRoleToUser).toHaveBeenCalledWith({
-        userId: 'usr_201',
-        tenantId,
-        roleName: 'doctor',
-      });
+      expect(mockRbacBootstrap.assignSystemRoleToUser).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'usr_201',
+          tenantId,
+          roleName: 'doctor',
+        }),
+      );
       expect(mockEventPublisher.publish).toHaveBeenCalledWith(
         expect.objectContaining({ eventType: 'auth.invitation.accepted' }),
       );

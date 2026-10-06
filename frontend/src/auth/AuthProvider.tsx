@@ -3,13 +3,31 @@ import type { AuthContextType, User, TenantInfo, ClinicInfo, AuthState } from '.
 import { authService } from './authService';
 import { tokenManager } from './tokenManager';
 import { useTenant } from '../contexts/TenantContext';
-import { invalidateApiCache } from '../services/api';
+import { api, invalidateApiCache } from '../services/api';
 import { telemetry } from '../services/telemetry';
 
 export const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 // Module-scoped promise to deduplicate session recovery across React 18 StrictMode double-mounts
 let activeSessionPromise: Promise<any> | null = null;
+
+// Pre-warm data cache in background non-blocking for authorized workflows
+const prewarmDataCache = (role?: string) => {
+  if (role === 'doctor') {
+    Promise.allSettled([
+      api.getDashboardSummary(),
+      api.getDoctors(),
+      api.getPatients(),
+    ]).catch(() => {});
+    return;
+  }
+  Promise.allSettled([
+    api.getDashboardSummary(),
+    api.getClinicSettings(),
+    api.getDoctors(),
+    api.getPatients(),
+  ]).catch(() => {});
+};
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
@@ -63,6 +81,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setTenantId(sessionData.tenant.id);
           }
           setAuthState('authenticated');
+          prewarmDataCache(sessionData.user.role);
         } else {
           tokenManager.clear();
           setUser(null);
@@ -146,9 +165,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [recoverSession]);
 
   const getDefaultRolePermissions = (role: string): string[] => {
-    if (role === 'super_admin' || role === 'clinic_owner') return ['*'];
-    if (role === 'doctor') return ['clinic:read', 'appointment:read', 'appointment:write', 'patient:read', 'patient:write', 'conversation:read', 'settings:read'];
-    return ['clinic:read', 'appointment:read', 'appointment:write', 'patient:read', 'patient:write', 'conversation:read'];
+    if (role === 'super_admin' || role === 'clinic_owner' || role === 'admin' || role === 'tenant_owner') return ['*'];
+    if (role === 'doctor') {
+      return [
+        'clinic.read',
+        'appointment.read',
+        'appointment.update',
+        'patient.read',
+        'patient.update',
+        'conversation.summary',
+        'calendar.read',
+        'calendar.write',
+        'doctor.read',
+        'faq.read',
+        'notification.read',
+      ];
+    }
+    return [
+      'clinic.read',
+      'appointment.read',
+      'appointment.update',
+      'patient.read',
+      'patient.update',
+      'conversation.read',
+      'notification.read',
+      'calendar.read',
+    ];
   };
 
   const login = async (credentialsOrEmail: any, passwordArg?: string) => {
@@ -176,6 +218,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       setAuthState('authenticated');
+      prewarmDataCache(activeUser.role);
     } catch (err: any) {
       const errorCode = err?.response?.data?.error?.code;
       if (errorCode === 'CLINIC_SUSPENDED' || errorCode === 'TENANT_SUSPENDED') {

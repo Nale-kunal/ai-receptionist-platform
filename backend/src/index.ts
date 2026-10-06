@@ -12,7 +12,8 @@ import express from 'express';
 import cookieParser from 'cookie-parser';
 import http from 'http';
 import zlib from 'zlib';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from './shared/database/prisma';
+import { withDbRetry } from './shared/database/dbRetry';
 import { validateEnv } from './config/env.validator';
 import { setupLogRedaction } from './shared/logger/redactor';
 import { createRequestContextMiddleware } from './shared/middleware/request-context.middleware';
@@ -215,24 +216,8 @@ async function bootstrap(): Promise<void> {
   validateEnv();
 
   // ── Prisma ──────────────────────────────────────────────────────────────
-  const prisma = new PrismaClient({
-    log: process.env['LOG_QUERIES'] === 'true' ? ['query', 'error', 'warn'] : ['error', 'warn'],
-  });
-
-  // Profile Prisma queries exceeding threshold (defaults to 2000ms, configurable via SLOW_QUERY_THRESHOLD_MS)
-  const slowQueryThresholdMs = parseInt(process.env['SLOW_QUERY_THRESHOLD_MS'] ?? '2000', 10);
-  if (slowQueryThresholdMs > 0) {
-    prisma.$use(async (params, next) => {
-      const start = performance.now();
-      const result = await next(params);
-      const duration = performance.now() - start;
-      if (duration > slowQueryThresholdMs) {
-        const modelName = params.model ?? 'query';
-        console.warn(`[PRISMA SLOW QUERY] ${modelName}.${params.action} execution time: ${duration.toFixed(2)}ms`);
-      }
-      return result;
-    });
-  }
+  // Uses shared singleton configured with connection pooling & slow query tracking
+  // (imported from ./shared/database/prisma)
 
   // ── Rate limiter stubs ────────────────────────────────────────────────────
   // No-op in development; replace with express-rate-limit in production or
@@ -434,7 +419,7 @@ async function bootstrap(): Promise<void> {
     whatsAppBookingService,
     whatsAppConversationService,
   );
-  const whatsAppOutboundService  = new WhatsAppOutboundService(whatsAppProvider, whatsAppMessageRepo);
+  const whatsAppOutboundService  = new WhatsAppOutboundService(whatsAppProvider, whatsAppMessageRepo, whatsAppIntegrationRepo);
 
   const whatsAppJobService       = new WhatsAppJobService(
     whatsAppJobRepo,
@@ -480,9 +465,23 @@ async function bootstrap(): Promise<void> {
   // ── Express app ───────────────────────────────────────────────────────────
   const app = express();
 
-  app.set('trust proxy', 1);
-  app.use(express.json({ limit: '1mb' }));
-  app.use(express.urlencoded({ extended: false, limit: '1mb' }));
+  // Exclude WhatsApp webhook from global json/urlencoded parsers to preserve raw Buffer for HMAC-SHA256 signature verification
+  const globalJsonParser = express.json({ limit: '1mb' });
+  const globalUrlencodedParser = express.urlencoded({ extended: false, limit: '1mb' });
+
+  app.use((req, res, next) => {
+    if (req.originalUrl.startsWith('/api/v1/webhooks/whatsapp') || req.path.startsWith('/api/v1/webhooks/whatsapp')) {
+      return next();
+    }
+    globalJsonParser(req, res, next);
+  });
+
+  app.use((req, res, next) => {
+    if (req.originalUrl.startsWith('/api/v1/webhooks/whatsapp') || req.path.startsWith('/api/v1/webhooks/whatsapp')) {
+      return next();
+    }
+    globalUrlencodedParser(req, res, next);
+  });
   app.use(cookieParser());
   app.use(createRequestContextMiddleware());
   app.use(createRequestProfilerMiddleware());
@@ -528,7 +527,7 @@ async function bootstrap(): Promise<void> {
     const allowedOrigin = process.env['CORS_ORIGIN'] || requestOrigin || 'http://localhost:5173';
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Request-ID, X-Request-Id, X-Correlation-Id, X-Trace-Id');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Request-ID, X-Request-Id, X-Correlation-Id, X-Trace-Id, Idempotency-Key, idempotency-key, X-Idempotency-Key, x-idempotency-key, X-Requested-With');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
 
     // Advanced security headers (Defense-in-Depth)
@@ -572,6 +571,7 @@ async function bootstrap(): Promise<void> {
   app.get('/health/liveness', healthHandler);
   app.get('/ready', readinessHandler);
   app.get('/health/readiness', readinessHandler);
+  app.get('/health/whatsapp', healthController.getWhatsAppHealth);
 
   // ── Prometheus metrics endpoint ───────────────────────────────────────────
   app.get('/metrics', (_req, res) => {
@@ -793,8 +793,16 @@ async function bootstrap(): Promise<void> {
 
   console.log(`[backend] Listening on port ${PORT} (${process.env['NODE_ENV'] ?? 'development'})`);
 
-  // Initialize mail queue AFTER server is listening and DB is confirmed reachable.
-  // This triggers startup crash recovery (stale lease detection) before worker begins polling.
+  // ── Startup database verification ──────────────────────────────────────────
+  try {
+    await withDbRetry(() => prisma.$queryRaw`SELECT 1`, 3, 1000);
+    console.log('[backend] Database connection verified (SELECT 1).');
+  } catch (dbErr: any) {
+    console.warn('[backend] Database connection check failed during startup (non-fatal):', dbErr?.message || dbErr);
+  }
+
+  // Initialize mail queue AFTER server is listening.
+  // Resilient worker uses exponential backoff if database is waking up.
   await mailQueueService.initialize().catch((err) => {
     console.error('[backend] MailQueueService initialization error (non-fatal):', err);
   });

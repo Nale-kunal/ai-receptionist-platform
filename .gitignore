@@ -40,6 +40,10 @@ backend/.env.*
 frontend/.env
 frontend/.env.*
 
+# Allow example template files
+!.env.example
+!**/.env.example
+
 # Logs
 logs
 *.log

@@ -76,14 +76,35 @@ const backendEnvSchema = z.object({
     z.number().int().min(1).max(65535)
   ),
   DATABASE_URL: z.string().url().refine(val => {
-    // Database URL checks
+    try {
+      const parsed = new URL(val);
+      if (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') {
+        return false;
+      }
+      if (!parsed.hostname || parsed.hostname.trim() === '') {
+        return false;
+      }
+    } catch {
+      return false;
+    }
     const isProd = process.env['NODE_ENV'] === 'production';
     if (isProd && val.includes('receptionist_secret_password')) {
       return false;
     }
     return true;
   }, {
-    message: "Production database URL must not use the default 'receptionist_secret_password' password"
+    message: "DATABASE_URL must be a valid PostgreSQL connection URL with protocol postgresql:// or postgres://"
+  }),
+  DIRECT_URL: z.string().url().optional().refine(val => {
+    if (!val) return true;
+    try {
+      const parsed = new URL(val);
+      return (parsed.protocol === 'postgresql:' || parsed.protocol === 'postgres:') && Boolean(parsed.hostname);
+    } catch {
+      return false;
+    }
+  }, {
+    message: "DIRECT_URL must be a valid PostgreSQL connection URL"
   }),
   JWT_ACCESS_SECRET: secretSchema,
   JWT_REFRESH_SECRET: secretSchema,
@@ -131,6 +152,8 @@ const backendEnvSchema = z.object({
   WHATSAPP_APP_SECRET: z.string().optional(),
   // WHATSAPP_ACCESS_TOKEN: Meta system user permanent access token
   WHATSAPP_ACCESS_TOKEN: z.string().optional(),
+  // WHATSAPP_WEBHOOK_VERIFY_TOKEN: Platform Meta Webhook GET verification token
+  WHATSAPP_WEBHOOK_VERIFY_TOKEN: z.string().min(8).optional(),
   // WHATSAPP_API_VERSION: Meta Graph API version, e.g. 'v21.0'
   WHATSAPP_API_VERSION: z.string().default('v21.0'),
 });
@@ -144,6 +167,7 @@ export function validateEnv(): ValidatedBackendEnv {
       NODE_ENV: 'test',
       PORT: 3000,
       DATABASE_URL: 'postgresql://postgres:pass@localhost:5432/db',
+      DIRECT_URL: 'postgresql://postgres:pass@localhost:5432/db',
       JWT_ACCESS_SECRET: 'test-secret-access-token-must-be-long-enough',
       JWT_REFRESH_SECRET: 'test-secret-refresh-token-must-be-long-enough',
       CALENDAR_ENCRYPTION_SECRET: 'test-secret-calendar-token-must-be-long',
@@ -157,6 +181,7 @@ export function validateEnv(): ValidatedBackendEnv {
       FRONTEND_URL: 'http://localhost:5173',
       BACKEND_URL: 'http://localhost:3000',
       WHATSAPP_API_VERSION: 'v21.0',
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'test_verify_token_12345',
     };
   }
 
@@ -194,8 +219,16 @@ export function validateEnv(): ValidatedBackendEnv {
       console.error('❌ FATAL: RESEND_API_KEY environment variable is required in production when EMAIL_PROVIDER=resend!');
       process.exit(1);
     }
-    if (result.data.WHATSAPP_ACCESS_TOKEN && !result.data.WHATSAPP_APP_SECRET) {
-      console.error('❌ FATAL: WHATSAPP_APP_SECRET is required when WHATSAPP_ACCESS_TOKEN is configured!');
+    if (!result.data.WHATSAPP_ACCESS_TOKEN) {
+      console.error('❌ FATAL: WHATSAPP_ACCESS_TOKEN is required in production mode!');
+      process.exit(1);
+    }
+    if (!result.data.WHATSAPP_APP_SECRET) {
+      console.error('❌ FATAL: WHATSAPP_APP_SECRET is required in production mode!');
+      process.exit(1);
+    }
+    if (!result.data.WHATSAPP_WEBHOOK_VERIFY_TOKEN) {
+      console.error('❌ FATAL: WHATSAPP_WEBHOOK_VERIFY_TOKEN is required in production mode!');
       process.exit(1);
     }
   }

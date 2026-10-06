@@ -3,26 +3,29 @@
  *
  * Super Admin interface for technical Meta configuration:
  *   - List all WhatsApp integrations across all clinics
- *   - Provision new integration with Meta Phone Number ID, WABA ID, and Webhook Verify Token
- *   - Edit technical credentials
- *   - Activate / Deactivate channels
+ *   - Provision new integration with Meta Phone Number ID, WABA ID, and Display Name
+ *   - Edit technical Meta IDs
+ *   - Test Meta Connectivity & Webhook Subscription without sending patient messages
+ *   - Verify & Activate / Deactivate channels
  */
 
 import React, { useEffect, useState } from 'react';
 import {
-  MessageSquare,
   Plus,
   CheckCircle,
   XCircle,
   RefreshCw,
-  Shield,
-  Phone,
-  Key,
   Building2,
   AlertCircle,
+  AlertTriangle,
   Edit2,
+  Activity,
+  ShieldCheck,
+  Check,
+  X,
 } from 'lucide-react';
 import { adminApiClient } from '../services/adminApiClient';
+import { adminFrontendCache } from '../services/adminCacheService';
 
 interface WhatsAppIntegrationItem {
   id: string;
@@ -30,14 +33,25 @@ interface WhatsAppIntegrationItem {
   phoneNumberId: string;
   wabaId: string;
   displayName: string;
-  webhookVerifyToken: string;
   status: string;
   isEnabled: boolean;
+  wabaSubscribed: boolean;
   clinic: { id: string; name: string };
   createdAt: string;
 }
 
-import { adminFrontendCache } from '../services/adminCacheService';
+interface DiagnosticResult {
+  title: string;
+  success: boolean;
+  message?: string;
+  checks?: {
+    credentials?: string;
+    waba?: string;
+    phoneNumber?: string;
+    webhookSubscription?: string;
+  };
+  details?: any;
+}
 
 const WA_CACHE_KEY = '/whatsapp';
 
@@ -48,6 +62,11 @@ export const WhatsAppList: React.FC = () => {
   const [showProvisionModal, setShowProvisionModal] = useState(false);
   const [editItem, setEditItem] = useState<WhatsAppIntegrationItem | null>(null);
 
+  // Diagnostic / Activation Result Modal
+  const [diagModal, setDiagModal] = useState<DiagnosticResult | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [activatingId, setActivatingId] = useState<string | null>(null);
+
   // Form state
   const [clinics, setClinics] = useState<Array<{ id: string; name: string }>>([]);
   const [formClinicId, setFormClinicId] = useState('');
@@ -55,7 +74,6 @@ export const WhatsAppList: React.FC = () => {
   const [formPhoneId, setFormPhoneId] = useState('');
   const [formWabaId, setFormWabaId] = useState('');
   const [formDisplayName, setFormDisplayName] = useState('');
-  const [formVerifyToken, setFormVerifyToken] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -135,7 +153,6 @@ export const WhatsAppList: React.FC = () => {
     setFormPhoneId('');
     setFormWabaId('');
     setFormDisplayName('');
-    setFormVerifyToken(''); // Admin must supply their own webhook verify token — never auto-generated
     setError(null);
     setShowProvisionModal(true);
   };
@@ -147,7 +164,6 @@ export const WhatsAppList: React.FC = () => {
     setFormPhoneId(item.phoneNumberId);
     setFormWabaId(item.wabaId);
     setFormDisplayName(item.displayName);
-    setFormVerifyToken(item.webhookVerifyToken);
     setError(null);
     setShowProvisionModal(true);
   };
@@ -159,22 +175,18 @@ export const WhatsAppList: React.FC = () => {
 
     try {
       if (editItem) {
-        // Update credentials
         await adminApiClient.patch(`/whatsapp/${editItem.id}`, {
           phoneNumberId: formPhoneId,
           wabaId: formWabaId,
           displayName: formDisplayName,
-          webhookVerifyToken: formVerifyToken,
         });
       } else {
-        // Provision new integration
         await adminApiClient.post('/whatsapp/provision', {
           clinicId: formClinicId,
           phoneNumber: formPhone,
           phoneNumberId: formPhoneId,
           wabaId: formWabaId,
           displayName: formDisplayName,
-          webhookVerifyToken: formVerifyToken,
         });
       }
 
@@ -188,15 +200,100 @@ export const WhatsAppList: React.FC = () => {
     }
   };
 
-  const handleToggleActivate = async (item: WhatsAppIntegrationItem) => {
-    const endpoint = item.isEnabled ? 'deactivate' : 'activate';
+  const handleTestConnection = async (item: WhatsAppIntegrationItem) => {
+    setTestingId(item.id);
     try {
-      await adminApiClient.post(`/whatsapp/${item.id}/${endpoint}`);
+      const res = await adminApiClient.post(`/whatsapp/${item.id}/test-connection`);
+      const data = res.data?.data;
+      setDiagModal({
+        title: `Diagnostic Results — ${item.clinic?.name || item.phoneNumber}`,
+        success: data?.healthy ?? false,
+        message: data?.healthy
+          ? 'Meta Cloud API connectivity and WABA configuration are healthy and verified.'
+          : data?.error || 'One or more Meta checks failed.',
+        checks: data?.checks,
+        details: data?.details,
+      });
       adminFrontendCache.invalidate();
       await fetchIntegrations(true);
-    } catch (err) {
-      console.error(`Failed to ${endpoint} WhatsApp integration:`, err);
+    } catch (err: any) {
+      const errData = err?.response?.data;
+      setDiagModal({
+        title: `Diagnostic Failed — ${item.clinic?.name || item.phoneNumber}`,
+        success: false,
+        message: errData?.error?.message || err?.message || 'Connection test failed.',
+        checks: errData?.error?.checks,
+      });
+    } finally {
+      setTestingId(null);
     }
+  };
+
+  const handleToggleActivate = async (item: WhatsAppIntegrationItem) => {
+    if (item.isEnabled) {
+      // Deactivate
+      try {
+        await adminApiClient.post(`/whatsapp/${item.id}/deactivate`);
+        adminFrontendCache.invalidate();
+        await fetchIntegrations(true);
+      } catch (err: any) {
+        console.error('Failed to deactivate WhatsApp integration:', err);
+      }
+      return;
+    }
+
+    // Activate — runs complete Meta verification pipeline
+    setActivatingId(item.id);
+    try {
+      const res = await adminApiClient.post(`/whatsapp/${item.id}/activate`);
+      const data = res.data?.data;
+      if (data?.success) {
+        setDiagModal({
+          title: `WhatsApp Activated — ${item.clinic?.name || item.phoneNumber}`,
+          success: true,
+          message: 'All Meta verification checks passed. WABA webhook subscribed and channel is now ACTIVE.',
+          checks: data?.checks,
+        });
+      }
+      adminFrontendCache.invalidate();
+      await fetchIntegrations(true);
+    } catch (err: any) {
+      const errData = err?.response?.data;
+      setDiagModal({
+        title: `Activation Failed — ${item.clinic?.name || item.phoneNumber}`,
+        success: false,
+        message:
+          errData?.error?.message ||
+          err?.message ||
+          'Verification failed. WhatsApp channel could not be activated.',
+        checks: errData?.error?.checks,
+      });
+      await fetchIntegrations(true);
+    } finally {
+      setActivatingId(null);
+    }
+  };
+
+  const renderCheckBadge = (status?: string) => {
+    if (status === 'passed') {
+      return (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#10B981', fontSize: '0.8rem', fontWeight: 600 }}>
+          <Check size={14} /> Passed
+        </span>
+      );
+    }
+    if (status === 'failed') {
+      return (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#EF4444', fontSize: '0.8rem', fontWeight: 600 }}>
+          <X size={14} /> Failed
+        </span>
+      );
+    }
+    return (
+      <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+        {status || 'Not run'}
+      </span>
+    );
   };
 
   return (
@@ -208,7 +305,7 @@ export const WhatsAppList: React.FC = () => {
             WhatsApp Technical Provisioning
           </h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginTop: '4px' }}>
-            Platform Admin ONLY — configure Meta credentials (Phone Number ID, WABA ID, Webhook Tokens).
+            Platform Admin ONLY — configure Meta credentials (Phone Number ID, WABA ID), verify connectivity, and manage webhook subscriptions.
           </p>
         </div>
 
@@ -245,7 +342,7 @@ export const WhatsAppList: React.FC = () => {
                 <th>Phone Number</th>
                 <th>Meta Phone ID</th>
                 <th>WABA ID</th>
-                <th>Webhook Token</th>
+                <th>Webhook Subscription</th>
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
@@ -266,8 +363,16 @@ export const WhatsAppList: React.FC = () => {
                   <td style={{ fontFamily: 'monospace', fontSize: '0.8rem', color: 'var(--accent-purple)' }}>
                     {item.wabaId}
                   </td>
-                  <td style={{ fontFamily: 'monospace', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                    {item.webhookVerifyToken?.slice(0, 10)}…
+                  <td>
+                    {item.wabaSubscribed ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#10B981', fontSize: '0.78rem', fontWeight: 600 }}>
+                        <ShieldCheck size={13} /> Subscribed
+                      </span>
+                    ) : (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: '#F59E0B', fontSize: '0.78rem', fontWeight: 600 }}>
+                        <AlertTriangle size={13} /> Not Subscribed
+                      </span>
+                    )}
                   </td>
                   <td>
                     <span className={`badge ${item.isEnabled ? 'badge-active' : 'badge-inactive'}`}>
@@ -277,14 +382,39 @@ export const WhatsAppList: React.FC = () => {
                   <td>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleTestConnection(item)}
+                        disabled={testingId === item.id || activatingId === item.id}
+                        title="Run safe Meta Cloud API connectivity and ownership checks"
+                      >
+                        {testingId === item.id ? (
+                          <RefreshCw size={12} className="spin" />
+                        ) : (
+                          <Activity size={12} />
+                        )}
+                        Test Connection
+                      </button>
+
+                      <button
                         className={`btn ${item.isEnabled ? 'btn-danger' : 'btn-success'} btn-sm`}
                         onClick={() => handleToggleActivate(item)}
+                        disabled={testingId === item.id || activatingId === item.id}
                       >
-                        {item.isEnabled ? 'Deactivate' : 'Activate'}
+                        {activatingId === item.id ? (
+                          <>
+                            <RefreshCw size={12} className="spin" /> Verifying…
+                          </>
+                        ) : item.isEnabled ? (
+                          'Deactivate'
+                        ) : (
+                          'Verify & Activate'
+                        )}
                       </button>
+
                       <button
                         className="btn btn-secondary btn-sm"
                         onClick={() => handleOpenEdit(item)}
+                        disabled={testingId === item.id || activatingId === item.id}
                       >
                         <Edit2 size={12} /> Edit Meta IDs
                       </button>
@@ -297,7 +427,83 @@ export const WhatsAppList: React.FC = () => {
         )}
       </div>
 
-      {/* Provision Modal */}
+      {/* Diagnostic & Activation Modal */}
+      {diagModal && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.75)',
+            backdropFilter: 'blur(5px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999,
+          }}
+        >
+          <div className="glass-card" style={{ width: '100%', maxWidth: '520px', padding: '28px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+              {diagModal.success ? (
+                <CheckCircle size={28} style={{ color: '#10B981', flexShrink: 0 }} />
+              ) : (
+                <XCircle size={28} style={{ color: '#EF4444', flexShrink: 0 }} />
+              )}
+              <h2 style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--text-primary)', margin: 0 }}>
+                {diagModal.title}
+              </h2>
+            </div>
+
+            <div
+              style={{
+                padding: '12px 14px',
+                borderRadius: '8px',
+                backgroundColor: diagModal.success ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)',
+                border: `1px solid ${diagModal.success ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                color: diagModal.success ? '#34D399' : '#F87171',
+                fontSize: '0.85rem',
+                marginBottom: '20px',
+                lineHeight: 1.5,
+              }}
+            >
+              {diagModal.message}
+            </div>
+
+            {diagModal.checks && (
+              <div style={{ marginBottom: '20px' }}>
+                <h4 style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '10px' }}>
+                  Verification Checks Breakdown
+                </h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', background: 'rgba(0,0,0,0.25)', borderRadius: '8px', padding: '12px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '0.83rem', color: 'var(--text-primary)' }}>Meta Credentials</span>
+                    {renderCheckBadge(diagModal.checks.credentials)}
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '0.83rem', color: 'var(--text-primary)' }}>WABA Account Access</span>
+                    {renderCheckBadge(diagModal.checks.waba)}
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '0.83rem', color: 'var(--text-primary)' }}>Phone Number Ownership</span>
+                    {renderCheckBadge(diagModal.checks.phoneNumber)}
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '0.83rem', color: 'var(--text-primary)' }}>WABA Webhook Subscription</span>
+                    {renderCheckBadge(diagModal.checks.webhookSubscription)}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '16px' }}>
+              <button className="btn btn-primary" onClick={() => setDiagModal(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Provision / Edit Modal */}
       {showProvisionModal && (
         <div
           style={{
@@ -413,21 +619,6 @@ export const WhatsAppList: React.FC = () => {
                   onChange={(e) => setFormDisplayName(e.target.value)}
                   placeholder="City Dental Clinic WA"
                   className="input"
-                />
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>
-                  Webhook Verify Token *
-                </label>
-                <input
-                  type="text"
-                  required
-                  minLength={8}
-                  value={formVerifyToken}
-                  onChange={(e) => setFormVerifyToken(e.target.value)}
-                  className="input"
-                  style={{ fontFamily: 'monospace' }}
                 />
               </div>
 

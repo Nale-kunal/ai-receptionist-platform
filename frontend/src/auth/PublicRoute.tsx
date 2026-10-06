@@ -21,9 +21,11 @@ export const PublicRoute: React.FC<PublicRouteProps> = ({ element }) => {
     return <ClinicSuspendedScreen onLogout={logout} />;
   }
 
-  // If user is already authenticated, redirect to redirect target or dashboard
-  if (user || authState === 'authenticated') {
-    const searchParams = new URLSearchParams(location.search);
+  const searchParams = new URLSearchParams(location.search);
+  const isForceLogin = searchParams.get('force') === 'true' || searchParams.get('logout') === 'true';
+
+  // If user is already authenticated and NOT forced to login, redirect to redirect target or dashboard
+  if (!isForceLogin && (user || authState === 'authenticated')) {
     const redirectParam = searchParams.get('redirect');
     const storedInviteRedirect = sessionStorage.getItem('pending_invite_redirect');
     const targetPath = redirectParam || storedInviteRedirect || '/';
@@ -31,6 +33,6 @@ export const PublicRoute: React.FC<PublicRouteProps> = ({ element }) => {
     return <Navigate to={targetPath} replace />;
   }
 
-  // Render guest page (Login, Register, etc.) only when authState == unauthenticated
+  // Render guest page (Login, Register, etc.)
   return element;
 };

@@ -404,7 +404,7 @@ const labelStyle: React.CSSProperties = {
 // Main Component
 // ─────────────────────────────────────────────────────────────────────────────
 export const UsersRbac: React.FC = () => {
-  const { user: currentUser, hasPermission } = useAuth();
+  const { user: currentUser, clinic, tenant, hasPermission } = useAuth();
   const { toasts, toast, removeToast, ToastContainer: TC } = useToast();
 
   // ── Data ────────────────────────────────────────────────────────────────────
@@ -440,6 +440,13 @@ export const UsersRbac: React.FC = () => {
   // ── Selected targets ─────────────────────────────────────────────────────────
   const [selectedUser, setSelectedUser] = useState<any | null>(null);
   const [newRole, setNewRole]   = useState('receptionist');
+  const [resendingId, setResendingId] = useState<string | null>(null);
+
+  // ── Revoke Member Modal State ────────────────────────────────────────────────
+  const [revokeTargetUser, setRevokeTargetUser] = useState<any | null>(null);
+  const [revokeReason, setRevokeReason] = useState('');
+  const [revokeReasonError, setRevokeReasonError] = useState('');
+  const [revokeSubmitting, setRevokeSubmitting] = useState(false);
 
   // ── Invite form state ────────────────────────────────────────────────────────
   const [inviteForm, setInviteForm] = useState({ firstName: '', lastName: '', email: '', role: 'receptionist' });
@@ -680,27 +687,38 @@ export const UsersRbac: React.FC = () => {
   };
 
   const handleRemoveUser = (user: any) => {
-    openConfirm({
-      title: 'Remove Team Member',
-      description: `Remove ${user.firstName ? `${user.firstName} ${user.lastName}` : user.email} from the practice? This is a soft delete — their data is retained and they can be restored later.`,
-      confirmLabel: 'Remove Member',
-      variant: 'danger',
-      onConfirm: async () => {
-        setConfirmLoading(true);
-        try {
-          await api.deleteUser(user.id);
-          setConfirmDialog(null);
-          toast(`${user.firstName || user.email} has been removed.`, 'success');
-          await loadUsers();
-        } catch (err: any) {
-          const msg = err?.response?.data?.error?.message || err.message || 'Failed to remove user.';
-          toast(msg, 'error');
-          setConfirmDialog(null);
-        } finally {
-          setConfirmLoading(false);
-        }
-      },
-    });
+    setRevokeTargetUser(user);
+    setRevokeReason('');
+    setRevokeReasonError('');
+  };
+
+  const handleConfirmRevoke = async () => {
+    if (!revokeTargetUser) return;
+    const trimmed = revokeReason.trim();
+    if (!trimmed) {
+      setRevokeReasonError('Please provide a reason for revoking access.');
+      return;
+    }
+    if (trimmed.length > 500) {
+      setRevokeReasonError('Reason cannot exceed 500 characters.');
+      return;
+    }
+
+    setRevokeSubmitting(true);
+    setRevokeReasonError('');
+    try {
+      await api.deleteUser(revokeTargetUser.id, trimmed);
+      toast(`Access revoked for ${revokeTargetUser.firstName || revokeTargetUser.email}.`, 'success');
+      setRevokeTargetUser(null);
+      setRevokeReason('');
+      await loadUsers();
+    } catch (err: any) {
+      const msg = err?.response?.data?.error?.message || err.message || 'Failed to revoke access.';
+      setRevokeReasonError(msg);
+      toast(msg, 'error');
+    } finally {
+      setRevokeSubmitting(false);
+    }
   };
 
   const handleRevokeInvitation = (inv: any) => {
@@ -728,14 +746,18 @@ export const UsersRbac: React.FC = () => {
   };
 
   const handleResendInvitation = async (inv: any) => {
+    if (resendingId) return;
+    setResendingId(inv.id);
     try {
       const result = await api.resendInvitation(inv.id);
-      toast(`Invitation resent to ${inv.email}.`, 'success');
+      toast(`Invitation email resent to ${inv.email} successfully.`, 'success');
       if (result?.inviteLink) console.info(`[Team] Resent invite link: ${result.inviteLink}`);
       await loadInvitations();
     } catch (err: any) {
-      const msg = err?.response?.data?.error?.message || err.message || 'Failed to resend invitation.';
+      const msg = err?.response?.data?.error?.message || err.message || 'Failed to resend invitation email.';
       toast(msg, 'error');
+    } finally {
+      setResendingId(null);
     }
   };
 
@@ -1095,18 +1117,21 @@ export const UsersRbac: React.FC = () => {
                       ? `${inv.invitedBy.firstName || ''} ${inv.invitedBy.lastName || ''}`.trim() || inv.invitedBy.email || '—'
                       : '—';
 
+                    const isResendable = (inv.status === 'pending' || inv.status === 'viewed' || inv.status === 'expired') && canInvite;
+
                     const actions = [
-                      inv.status === 'pending' && canInvite && {
-                        label: 'Resend',
+                      isResendable && {
+                        label: 'Resend Email',
                         icon: <RotateCcw size={14} />,
                         onClick: () => handleResendInvitation(inv),
+                        disabled: resendingId === inv.id,
                       },
-                      (inv.status === 'pending' || inv.status === 'expired') && canInvite && {
+                      (inv.status === 'pending' || inv.status === 'viewed' || inv.status === 'expired') && canInvite && {
                         label: 'Copy Invite Link',
                         icon: <Copy size={14} />,
                         onClick: () => handleCopyInviteLink(inv),
                       },
-                      inv.status === 'pending' && canInvite && {
+                      (inv.status === 'pending' || inv.status === 'viewed') && canInvite && {
                         label: 'Revoke',
                         icon: <XCircle size={14} />,
                         danger: true,
@@ -1141,7 +1166,48 @@ export const UsersRbac: React.FC = () => {
                           </div>
                         </td>
                         <td style={{ padding: '12px 16px' }}>
-                          {actions.length > 0 ? <ActionsDropdown items={actions} /> : <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>—</span>}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            {isResendable && (
+                              <button
+                                id={`resend-btn-${inv.id}`}
+                                onClick={() => handleResendInvitation(inv)}
+                                disabled={resendingId === inv.id}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 6,
+                                  padding: '5px 12px',
+                                  borderRadius: 8,
+                                  fontSize: '0.75rem',
+                                  fontWeight: 600,
+                                  background: resendingId === inv.id ? 'var(--bg-secondary)' : 'rgba(99, 102, 241, 0.12)',
+                                  color: resendingId === inv.id ? 'var(--text-muted)' : '#818cf8',
+                                  border: '1px solid rgba(99, 102, 241, 0.25)',
+                                  cursor: resendingId === inv.id ? 'not-allowed' : 'pointer',
+                                  transition: 'all 0.15s ease',
+                                  whiteSpace: 'nowrap',
+                                }}
+                                title="Resend invitation email"
+                              >
+                                {resendingId === inv.id ? (
+                                  <>
+                                    <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                                    <span>Sending...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <RotateCcw size={12} />
+                                    <span>Resend Email</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
+                            {actions.length > 0 ? (
+                              <ActionsDropdown items={actions} />
+                            ) : !isResendable ? (
+                              <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>—</span>
+                            ) : null}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -1321,6 +1387,138 @@ export const UsersRbac: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── Revoke Member Modal ────────────────────────────────────────────── */}
+      {revokeTargetUser && (
+        <div style={overlayStyle} onClick={() => !revokeSubmitting && setRevokeTargetUser(null)}>
+          <div style={{ ...modalCardStyle, maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'rgba(239, 68, 68, 0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Trash2 size={18} style={{ color: '#ef4444' }} />
+                </div>
+                <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                  Revoke Clinic Access
+                </h3>
+              </div>
+              <button
+                onClick={() => !revokeSubmitting && setRevokeTargetUser(null)}
+                disabled={revokeSubmitting}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Warning Banner */}
+            <div style={{
+              display: 'flex',
+              gap: 10,
+              padding: '12px 14px',
+              background: 'rgba(239, 68, 68, 0.08)',
+              borderRadius: 8,
+              border: '1px solid rgba(239, 68, 68, 0.2)',
+              marginBottom: 18,
+            }}>
+              <AlertTriangle size={18} style={{ color: '#ef4444', flexShrink: 0, marginTop: 2 }} />
+              <p style={{ margin: 0, fontSize: '0.85rem', color: '#b91c1c', lineHeight: 1.5 }}>
+                Revoking access will immediately remove this member's access to <strong>{clinic?.name || tenant?.name || 'Tooth Oracle Home'}</strong>.
+              </p>
+            </div>
+
+            {/* Target Member Summary Card */}
+            <div style={{
+              background: 'var(--bg-secondary)',
+              border: '1px solid var(--border-color)',
+              borderRadius: 8,
+              padding: '12px 16px',
+              marginBottom: 18,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {revokeTargetUser.firstName ? `${revokeTargetUser.firstName} ${revokeTargetUser.lastName}` : revokeTargetUser.email}
+                </span>
+                <RoleBadge role={revokeTargetUser.role} />
+              </div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                {revokeTargetUser.email}
+              </div>
+            </div>
+
+            {/* Mandatory Reason Input */}
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <label style={{ ...labelStyle, margin: 0 }}>
+                  Reason for revocation <span style={{ color: 'var(--error)' }}>*</span>
+                </label>
+                <span style={{ fontSize: '0.75rem', color: revokeReason.length > 500 ? 'var(--error)' : 'var(--text-muted)' }}>
+                  {revokeReason.length} / 500
+                </span>
+              </div>
+              <textarea
+                value={revokeReason}
+                onChange={(e) => {
+                  setRevokeReason(e.target.value);
+                  if (revokeReasonError) setRevokeReasonError('');
+                }}
+                placeholder="Example: Employee no longer works at the clinic."
+                disabled={revokeSubmitting}
+                rows={3}
+                style={{
+                  ...inputStyle,
+                  width: '100%',
+                  minHeight: 80,
+                  resize: 'vertical',
+                  borderColor: revokeReasonError ? 'var(--error)' : undefined,
+                  fontFamily: 'inherit',
+                }}
+              />
+              {revokeReasonError && (
+                <p style={{ fontSize: '0.78rem', color: 'var(--error)', margin: '6px 0 0', fontWeight: 500 }}>
+                  {revokeReasonError}
+                </p>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                onClick={() => setRevokeTargetUser(null)}
+                disabled={revokeSubmitting}
+                style={secondaryBtnStyle}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmRevoke}
+                disabled={revokeSubmitting || !revokeReason.trim()}
+                style={{
+                  padding: '9px 20px',
+                  borderRadius: 8,
+                  background: '#ef4444',
+                  color: '#fff',
+                  border: 'none',
+                  cursor: (revokeSubmitting || !revokeReason.trim()) ? 'not-allowed' : 'pointer',
+                  fontWeight: 600,
+                  fontSize: '0.875rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  opacity: (revokeSubmitting || !revokeReason.trim()) ? 0.6 : 1,
+                }}
+              >
+                {revokeSubmitting ? (
+                  <><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Revoking…</>
+                ) : (
+                  <><Trash2 size={14} /> Revoke Access</>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

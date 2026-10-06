@@ -33,5 +33,8 @@ export function createInvitationRoutes(deps: InvitationRouterDeps): Router {
   router.delete('/:id',                authenticate, resolveTenant, requireInvite, controller.revoke);
   router.post('/:id/resend',           authenticate, resolveTenant, requireInvite, controller.resend);
 
+  // ── Direct Token Resolution Alias ──
+  router.get('/:token', controller.getByToken);
+
   return router;
 }

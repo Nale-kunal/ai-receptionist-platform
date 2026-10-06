@@ -22,6 +22,8 @@ function makeController(): AppointmentController {
     getAppointmentByPublicId:makeNoop(),
     updateAppointment:       makeNoop(),
     confirmAppointment:      makeNoop(),
+    checkInAppointment:      makeNoop(),
+    startAppointment:        makeNoop(),
     cancelAppointment:       makeNoop(),
     rescheduleAppointment:   makeNoop(),
     completeAppointment:     makeNoop(),

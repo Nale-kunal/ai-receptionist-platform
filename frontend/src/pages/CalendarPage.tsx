@@ -6,6 +6,8 @@ import { Badge } from '../components/ui/Badge';
 import { Modal } from '../components/ui/Modal';
 import { api, type ApiAppointment, type ApiDoctor, type ApiPatient } from '../services/api';
 import { availabilityBus } from '../services/availabilityBus';
+import { APPOINTMENT_REASONS, getAppointmentReasonLabel } from '../constants/appointmentReasons';
+import { BookAppointmentModal } from '../components/BookAppointmentModal';
 import {
   ChevronLeft,
   ChevronRight,
@@ -44,6 +46,10 @@ export const CalendarPage: React.FC = () => {
   const [bookingDoctorId, setBookingDoctorId] = useState('');
   const [bookingDate, setBookingDate] = useState('');
   const [bookingTime, setBookingTime] = useState('');
+  const [bookingReason, setBookingReason] = useState('routine_checkup');
+  const [bookingOtherReason, setBookingOtherReason] = useState('');
+  const [bookingNotes, setBookingNotes] = useState('');
+  const [bookingError, setBookingError] = useState<string | null>(null);
 
   const [rescheduleDate, setRescheduleDate] = useState('');
   const [rescheduleTime, setRescheduleTime] = useState('');
@@ -229,17 +235,35 @@ export const CalendarPage: React.FC = () => {
 
   const handleBookSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setBookingError(null);
+
+    // Validation
+    if (!bookingReason) {
+      setBookingError('Please select an appointment reason.');
+      return;
+    }
+
+    if (bookingReason === 'other' && !bookingOtherReason.trim()) {
+      setBookingError('Please specify the reason when selecting "Other".');
+      return;
+    }
+
+    if (!bookingTime) {
+      setBookingError('Please select an available practitioner time slot.');
+      return;
+    }
+
     try {
       let patient = selectedPatient;
       if (isNewPatient || !patient) {
-        if (!newPatientForm.name || !newPatientForm.phone) {
-          alert('Patient Name and Phone are required.');
+        if (!newPatientForm.name.trim() || !newPatientForm.phone.trim()) {
+          setBookingError('Patient Name and Phone are required.');
           return;
         }
         patient = await api.createPatient({
-          name: newPatientForm.name,
-          phone: newPatientForm.phone,
-          email: newPatientForm.email,
+          name: newPatientForm.name.trim(),
+          phone: newPatientForm.phone.trim(),
+          email: newPatientForm.email.trim(),
           dob: '',
         });
       }
@@ -248,20 +272,34 @@ export const CalendarPage: React.FC = () => {
       if (!doctor) throw new Error('Doctor not selected.');
 
       await api.createAppointment({
+        patientId: patient.id,
+        doctorId: doctor.id,
         patientName: patient.name,
         patientPhone: patient.phone,
         doctorName: doctor.name,
         date: bookingDate,
         time: bookingTime,
-        status: 'pending',
+        status: 'scheduled',
+        appointmentType: bookingReason,
+        otherReason: bookingReason === 'other' ? bookingOtherReason.trim() : undefined,
+        notes: bookingNotes.trim() || undefined,
+        durationMinutes: 30,
       });
 
       setShowBookModal(false);
       resetBookingForm();
       loadData();
-    } catch (err) {
-      console.error(err);
-      alert('Double booking conflict detected. Please select another slot.');
+    } catch (err: any) {
+      console.error('Calendar booking error:', err);
+      const errData = err.response?.data?.error;
+      const status = err.response?.status;
+      if (status === 409 || errData?.code === 'APPOINTMENT_CONFLICT' || errData?.code === 'APPOINTMENT_SLOT_TAKEN') {
+        setBookingError('This time slot is no longer available. Please select another available time.');
+        availabilityBus.publish();
+      } else {
+        const msg = errData?.message || err.message || 'Scheduling conflict detected. Please select another slot.';
+        setBookingError(msg);
+      }
     }
   };
 
@@ -270,15 +308,13 @@ export const CalendarPage: React.FC = () => {
     if (!selectedAppointment || !rescheduleDate || !rescheduleTime) return;
 
     try {
-      await api.updateAppointment(selectedAppointment.id, {
-        date: rescheduleDate,
-        time: rescheduleTime,
-      });
+      await api.rescheduleAppointment(selectedAppointment.id, rescheduleDate, rescheduleTime, 30);
       setShowRescheduleModal(false);
       loadData();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert('Reschedule conflict detected. Choose a different time.');
+      const msg = err.response?.data?.error?.message || err.message || 'Reschedule conflict detected. Choose a different time.';
+      alert(msg);
     }
   };
 
@@ -311,6 +347,10 @@ export const CalendarPage: React.FC = () => {
     setNewPatientForm({ name: '', phone: '', email: '' });
     setBookingDate('');
     setBookingTime('');
+    setBookingReason('routine_checkup');
+    setBookingOtherReason('');
+    setBookingNotes('');
+    setBookingError(null);
   };
 
   const getStatusColor = (status: ApiAppointment['status']) => {
@@ -672,199 +712,18 @@ export const CalendarPage: React.FC = () => {
         )}
       </Card>
 
-      {/* ── CREATE APPOINTMENT MODAL ── */}
-      <Modal isOpen={showBookModal} onClose={() => setShowBookModal(false)} title="Schedule Appointment Slot">
-        <form onSubmit={handleBookSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {/* Patient Assignment */}
-          <div style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '16px' }}>
-            <h4 style={{ fontSize: '0.9rem', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <User size={16} style={{ color: 'var(--primary)' }} />
-              <span>Patient Assignment</span>
-            </h4>
+      {/* ── CREATE APPOINTMENT MODAL (UNIFIED STANDARD UI/UX) ── */}
+      <BookAppointmentModal
+        isOpen={showBookModal}
+        onClose={() => setShowBookModal(false)}
+        onSuccess={async () => {
+          await loadData();
+        }}
+        initialDate={bookingDate}
+        initialTime={bookingTime}
+        initialDoctorId={bookingDoctorId}
+      />
 
-            {!selectedPatient && !isNewPatient ? (
-              <div style={{ position: 'relative' }}>
-                <Input
-                  placeholder="Search existing patients by name or phone..."
-                  value={patientSearch}
-                  onChange={(e) => setPatientSearch(e.target.value)}
-                  style={{ marginBottom: '4px' }}
-                />
-                {filteredPatients.length > 0 && (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      top: '100%',
-                      left: 0,
-                      right: 0,
-                      backgroundColor: 'var(--bg-primary)',
-                      border: '1px solid var(--border-color)',
-                      borderRadius: 'var(--radius)',
-                      boxShadow: 'var(--shadow-lg)',
-                      zIndex: 10,
-                      maxHeight: '160px',
-                      overflowY: 'auto',
-                    }}
-                  >
-                    {filteredPatients.map((p) => (
-                      <div
-                        key={p.id}
-                        onClick={() => {
-                          setSelectedPatient(p);
-                          setPatientSearch('');
-                        }}
-                        style={{
-                          padding: '10px 12px',
-                          cursor: 'pointer',
-                          borderBottom: '1px solid var(--border-color)',
-                          fontSize: '0.875rem',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                        }}
-                      >
-                        <span style={{ fontWeight: 600 }}>{p.name}</span>
-                        <span style={{ color: 'var(--text-secondary)' }}>{p.phone}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <div style={{ marginTop: '8px' }}>
-                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>New patient? </span>
-                  <button
-                    type="button"
-                    onClick={() => setIsNewPatient(true)}
-                    style={{ background: 'none', border: 'none', color: 'var(--primary)', fontWeight: 600, cursor: 'pointer', fontSize: '0.8rem', padding: 0 }}
-                  >
-                    Register Inline
-                  </button>
-                </div>
-              </div>
-            ) : selectedPatient ? (
-              <div style={{ padding: '12px', borderRadius: 'var(--radius)', backgroundColor: 'var(--success-light)', color: 'var(--success)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.875rem' }}>
-                <div>
-                  <strong style={{ display: 'block' }}>{selectedPatient.name}</strong>
-                  <span style={{ fontSize: '0.75rem' }}>{selectedPatient.phone}</span>
-                </div>
-                <button type="button" onClick={() => setSelectedPatient(null)} style={{ background: 'none', border: 'none', color: 'var(--success)', cursor: 'pointer', fontSize: '0.75rem', textDecoration: 'underline' }}>
-                  Change
-                </button>
-              </div>
-            ) : (
-              <div style={{ padding: '12px', borderRadius: 'var(--radius)', border: '1px dashed var(--border-color)', backgroundColor: 'var(--bg-secondary)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <div className="flex justify-between items-center">
-                  <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>New Patient Details</span>
-                  <button type="button" onClick={() => setIsNewPatient(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.75rem' }}>
-                    Search Instead
-                  </button>
-                </div>
-                <Input
-                  placeholder="Patient Full Name"
-                  required
-                  value={newPatientForm.name}
-                  onChange={(e) => setNewPatientForm({ ...newPatientForm, name: e.target.value })}
-                />
-                <div className="grid grid-cols-2 gap-4">
-                  <Input
-                    placeholder="Phone Number"
-                    required
-                    value={newPatientForm.phone}
-                    onChange={(e) => setNewPatientForm({ ...newPatientForm, phone: e.target.value })}
-                  />
-                  <Input
-                    placeholder="Email Address"
-                    type="email"
-                    value={newPatientForm.email}
-                    onChange={(e) => setNewPatientForm({ ...newPatientForm, email: e.target.value })}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Doctor Assignment */}
-          <div style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '16px' }}>
-            <h4 style={{ fontSize: '0.9rem', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <User size={16} style={{ color: 'var(--primary)' }} />
-              <span>Dentist Assignment</span>
-            </h4>
-            <select
-              value={bookingDoctorId}
-              onChange={(e) => {
-                setBookingDoctorId(e.target.value);
-                setBookingTime('');
-              }}
-              className="input"
-              required
-            >
-              {doctors.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name} ({d.specialty})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Choose Slot */}
-          <div>
-            <h4 style={{ fontSize: '0.9rem', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <CalendarIcon size={16} style={{ color: 'var(--primary)' }} />
-              <span>Select Date & Time</span>
-            </h4>
-            <Input
-              type="date"
-              value={bookingDate}
-              onChange={(e) => {
-                setBookingDate(e.target.value);
-                setBookingTime('');
-              }}
-              required
-            />
-
-            {bookingDate && (
-              <div style={{ marginTop: '12px' }}>
-                <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block', marginBottom: '6px' }}>
-                  Practitioner Available Time Slots (Single Source of Truth)
-                </label>
-                {loadingCalendarSlots ? (
-                  <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Loading slots...</p>
-                ) : calendarBookSlots.length === 0 ? (
-                  <p style={{ fontSize: '0.8rem', color: 'var(--error)' }}>No slots available on this date.</p>
-                ) : (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', maxHeight: '160px', overflowY: 'auto' }}>
-                    {calendarBookSlots.map((slot) => (
-                      <button
-                        key={slot.time}
-                        type="button"
-                        disabled={!slot.available}
-                        onClick={() => slot.available && setBookingTime(slot.time)}
-                        title={!slot.available ? slot.reason || 'Unavailable' : `Available ${slot.time} - ${slot.endTime}`}
-                        style={{
-                          padding: '6px 4px',
-                          borderRadius: 'var(--radius)',
-                          border: bookingTime === slot.time ? '2px solid var(--primary)' : '1px solid var(--border-color)',
-                          backgroundColor: !slot.available ? 'var(--bg-disabled, #f3f4f6)' : bookingTime === slot.time ? 'var(--primary-light)' : 'var(--bg-secondary)',
-                          color: !slot.available ? 'var(--text-disabled, #9ca3af)' : bookingTime === slot.time ? 'var(--primary)' : 'var(--text-primary)',
-                          fontSize: '0.75rem',
-                          fontWeight: bookingTime === slot.time ? 700 : 500,
-                          cursor: slot.available ? 'pointer' : 'not-allowed',
-                          textDecoration: !slot.available ? 'line-through' : 'none',
-                          opacity: !slot.available ? 0.6 : 1,
-                        }}
-                      >
-                        {slot.time}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          <Button type="submit" style={{ marginTop: '8px', width: '100%' }}>
-            Book Slot
-          </Button>
-        </form>
-      </Modal>
 
       {/* ── APPOINTMENT DETAIL ACTION CENTER ── */}
       <Modal isOpen={showDetailModal} onClose={() => setShowDetailModal(false)} title="Appointment Details">
@@ -887,6 +746,16 @@ export const CalendarPage: React.FC = () => {
                 <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Appointment Schedule:</span>
                 <strong>{selectedAppointment.date} at {selectedAppointment.time}</strong>
               </div>
+              <div className="flex justify-between">
+                <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Reason:</span>
+                <span style={{ fontWeight: 600 }}>{getAppointmentReasonLabel(selectedAppointment.appointmentType)}</span>
+              </div>
+              {selectedAppointment.notes && (
+                <div style={{ padding: '8px 12px', backgroundColor: 'var(--bg-secondary)', borderRadius: 'var(--radius)', border: '1px solid var(--border-color)', fontSize: '0.825rem' }}>
+                  <span style={{ color: 'var(--text-muted)', display: 'block', marginBottom: '2px', fontSize: '0.75rem' }}>Notes / Details:</span>
+                  <span>{selectedAppointment.notes}</span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Status:</span>
                 <Badge variant={selectedAppointment.status === 'scheduled' ? 'success' : selectedAppointment.status === 'pending' ? 'warning' : 'danger'}>

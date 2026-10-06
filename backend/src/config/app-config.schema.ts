@@ -20,6 +20,7 @@ export const appConfigSchema = z.object({
 
   database: z.object({
     url: z.string().url(),
+    directUrl: z.string().url().optional(),
     logQueries: z.boolean().default(false),
   }),
 

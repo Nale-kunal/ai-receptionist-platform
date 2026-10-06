@@ -13,6 +13,8 @@ import { RecentCallsWidget } from '../components/dashboard/RecentCallsWidget';
 import { telemetry } from '../services/telemetry';
 import { api, parseAppointmentItem } from '../services/api';
 import { availabilityBus } from '../services/availabilityBus';
+import { APPOINTMENT_REASONS, getAppointmentReasonLabel } from '../constants/appointmentReasons';
+import { BookAppointmentModal } from '../components/BookAppointmentModal';
 import type { ApiAppointment, ApiDoctor, ApiPatient } from '../services/api';
 import {
   PhoneCall,
@@ -31,6 +33,7 @@ import {
   Filter,
   ListFilter,
   Grid,
+  Users,
 } from 'lucide-react';
 import { useDashboardStateMachine } from '../hooks/useDashboardStateMachine';
 
@@ -68,6 +71,10 @@ export const DashboardHome: React.FC = () => {
   const [bookingDate, setBookingDate] = useState('');
   const [bookingTime, setBookingTime] = useState('');
   const [bookingDuration, setBookingDuration] = useState(30);
+  const [bookingReason, setBookingReason] = useState('routine_checkup');
+  const [bookingOtherReason, setBookingOtherReason] = useState('');
+  const [bookingNotes, setBookingNotes] = useState('');
+  const [bookingError, setBookingError] = useState<string | null>(null);
   const [bookingSubmitting, setBookingSubmitting] = useState(false);
   const [dashboardAvailableSlots, setDashboardAvailableSlots] = useState<Array<{ time: string; endTime: string; available: boolean; reason?: string; reasonCode?: string }>>([]);
   const [loadingDashboardSlots, setLoadingDashboardSlots] = useState<boolean>(false);
@@ -273,6 +280,10 @@ export const DashboardHome: React.FC = () => {
     setBookingDate(todayStr);
     setBookingTime('');
     setBookingDuration(30);
+    setBookingReason('routine_checkup');
+    setBookingOtherReason('');
+    setBookingNotes('');
+    setBookingError(null);
     if (doctors.length > 0) setBookingDoctorId(doctors[0].id);
   };
 
@@ -321,19 +332,37 @@ export const DashboardHome: React.FC = () => {
 
   const handleBookSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setBookingError(null);
+
+    // 1. Validation checks
+    if (!bookingReason) {
+      setBookingError('Please select an appointment reason.');
+      return;
+    }
+
+    if (bookingReason === 'other' && !bookingOtherReason.trim()) {
+      setBookingError('Please specify the reason for this appointment.');
+      return;
+    }
+
+    if (!bookingTime) {
+      setBookingError('Please select an available practitioner time slot.');
+      return;
+    }
+
     setBookingSubmitting(true);
     try {
       let patient = selectedPatient;
       if (isNewPatient || !patient) {
-        if (!newPatientForm.name || !newPatientForm.phone) {
-          alert('Patient Name and Phone are required.');
+        if (!newPatientForm.name.trim() || !newPatientForm.phone.trim()) {
+          setBookingError('Patient Full Name and Phone Number are required.');
           setBookingSubmitting(false);
           return;
         }
         patient = await api.createPatient({
-          name: newPatientForm.name,
-          phone: newPatientForm.phone,
-          email: newPatientForm.email,
+          name: newPatientForm.name.trim(),
+          phone: newPatientForm.phone.trim(),
+          email: newPatientForm.email.trim(),
           dob: '',
         });
       }
@@ -342,21 +371,38 @@ export const DashboardHome: React.FC = () => {
       if (!doctor) throw new Error('Please select a dentist.');
 
       await api.createAppointment({
+        doctorId: doctor.id,
+        patientId: patient.id,
         patientName: patient.name,
         patientPhone: patient.phone,
         doctorName: doctor.name,
         date: bookingDate || todayStr,
-        time: bookingTime || '09:00',
+        time: bookingTime,
         durationMinutes: bookingDuration,
-        status: 'pending',
+        appointmentType: bookingReason,
+        otherReason: bookingReason === 'other' ? bookingOtherReason.trim() : undefined,
+        notes: bookingNotes.trim() || undefined,
+        status: 'scheduled',
       });
 
       setShowBookModal(false);
       resetBookingForm();
       await loadDashboardData();
     } catch (err: any) {
-      console.error(err);
-      alert(err.message || 'Failed to schedule appointment.');
+      console.error('Appointment booking error:', err);
+      const errData = err.response?.data?.error;
+      const status = err.response?.status;
+
+      if (status === 409 || errData?.code === 'APPOINTMENT_CONFLICT' || errData?.code === 'APPOINTMENT_SLOT_TAKEN') {
+        setBookingError('This time slot is no longer available. Please select another available time.');
+        availabilityBus.publish(); // Re-trigger availability fetch to show newly taken slot
+      } else if (errData?.message) {
+        setBookingError(errData.message);
+      } else if (err.message) {
+        setBookingError(err.message);
+      } else {
+        setBookingError('Failed to schedule appointment. Please check the details and try again.');
+      }
     } finally {
       setBookingSubmitting(false);
     }
@@ -871,10 +917,12 @@ export const DashboardHome: React.FC = () => {
             )}
           </Card>
 
-          {/* Recent AI Call Logs Panel */}
-          <WidgetErrorBoundary widgetName="Recent AI Calls">
-            <RecentCallsWidget />
-          </WidgetErrorBoundary>
+          {/* Recent AI Call Logs Panel (Owner & Receptionist only) */}
+          {!isDoctorRole && (
+            <WidgetErrorBoundary widgetName="Recent AI Calls">
+              <RecentCallsWidget />
+            </WidgetErrorBoundary>
+          )}
         </div>
 
         {/* Right Column: Quick Actions & Pending Confirmations */}
@@ -932,35 +980,62 @@ export const DashboardHome: React.FC = () => {
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <Calendar size={16} />
-                  <span>Open Standalone Calendar Page</span>
+                  <span>Open Calendar Schedule</span>
                 </div>
                 <ArrowRight size={14} style={{ color: 'var(--text-muted)' }} />
               </button>
 
-              <button
-                onClick={() => navigate('/ai-receptionist/live')}
-                style={{
-                  width: '100%',
-                  padding: '12px',
-                  borderRadius: 'var(--radius)',
-                  border: '1px solid var(--border-color)',
-                  backgroundColor: 'var(--bg-secondary)',
-                  color: 'var(--text-primary)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  cursor: 'pointer',
-                  fontWeight: 500,
-                  fontSize: '0.875rem',
-                  textAlign: 'left',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <PhoneCall size={16} />
-                  <span>Live Calls</span>
-                </div>
-                <ArrowRight size={14} style={{ color: 'var(--text-muted)' }} />
-              </button>
+              {isDoctorRole ? (
+                <button
+                  onClick={() => navigate('/patients')}
+                  style={{
+                    width: '100%',
+                    padding: '12px',
+                    borderRadius: 'var(--radius)',
+                    border: '1px solid var(--border-color)',
+                    backgroundColor: 'var(--bg-secondary)',
+                    color: 'var(--text-primary)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    cursor: 'pointer',
+                    fontWeight: 500,
+                    fontSize: '0.875rem',
+                    textAlign: 'left',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Users size={16} />
+                    <span>My Patients</span>
+                  </div>
+                  <ArrowRight size={14} style={{ color: 'var(--text-muted)' }} />
+                </button>
+              ) : (
+                <button
+                  onClick={() => navigate('/ai-receptionist/live')}
+                  style={{
+                    width: '100%',
+                    padding: '12px',
+                    borderRadius: 'var(--radius)',
+                    border: '1px solid var(--border-color)',
+                    backgroundColor: 'var(--bg-secondary)',
+                    color: 'var(--text-primary)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    cursor: 'pointer',
+                    fontWeight: 500,
+                    fontSize: '0.875rem',
+                    textAlign: 'left',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <PhoneCall size={16} />
+                    <span>Live Calls</span>
+                  </div>
+                  <ArrowRight size={14} style={{ color: 'var(--text-muted)' }} />
+                </button>
+              )}
             </div>
           </Card>
 
@@ -1022,229 +1097,17 @@ export const DashboardHome: React.FC = () => {
         </div>
       </div>
 
-      {/* ── CREATE APPOINTMENT MODAL (DASHBOARD) ── */}
-      <Modal isOpen={showBookModal} onClose={() => setShowBookModal(false)} title="Schedule Appointment">
-        <form onSubmit={handleBookSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {/* Patient Assignment */}
-          <div style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '16px' }}>
-            <h4 style={{ fontSize: '0.9rem', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <User size={16} style={{ color: 'var(--primary)' }} />
-              <span>Patient Assignment</span>
-            </h4>
+      {/* ── SCHEDULE APPOINTMENT MODAL (UNIFIED STANDARD UI/UX) ── */}
+      <BookAppointmentModal
+        isOpen={showBookModal}
+        onClose={() => setShowBookModal(false)}
+        onSuccess={async () => {
+          await loadDashboardData();
+        }}
+        initialDate={bookingDate}
+        initialDoctorId={bookingDoctorId}
+      />
 
-            {!selectedPatient && !isNewPatient ? (
-              <div style={{ position: 'relative' }}>
-                <Input
-                  placeholder="Search patients by name or phone..."
-                  value={patientSearch}
-                  onChange={(e) => setPatientSearch(e.target.value)}
-                  style={{ marginBottom: '4px' }}
-                />
-                {filteredPatients.length > 0 && (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      top: '100%',
-                      left: 0,
-                      right: 0,
-                      backgroundColor: 'var(--bg-primary)',
-                      border: '1px solid var(--border-color)',
-                      borderRadius: 'var(--radius)',
-                      boxShadow: 'var(--shadow-lg)',
-                      zIndex: 10,
-                      maxHeight: '160px',
-                      overflowY: 'auto',
-                    }}
-                  >
-                    {filteredPatients.map((p) => (
-                      <div
-                        key={p.id}
-                        onClick={() => {
-                          setSelectedPatient(p);
-                          setPatientSearch('');
-                        }}
-                        style={{
-                          padding: '10px 12px',
-                          cursor: 'pointer',
-                          borderBottom: '1px solid var(--border-color)',
-                          fontSize: '0.875rem',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                        }}
-                      >
-                        <span style={{ fontWeight: 600 }}>{p.name}</span>
-                        <span style={{ color: 'var(--text-secondary)' }}>{p.phone}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <div style={{ marginTop: '8px' }}>
-                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>New patient? </span>
-                  <button
-                    type="button"
-                    onClick={() => setIsNewPatient(true)}
-                    style={{ background: 'none', border: 'none', color: 'var(--primary)', fontWeight: 600, cursor: 'pointer', fontSize: '0.8rem', padding: 0 }}
-                  >
-                    Register Inline
-                  </button>
-                </div>
-              </div>
-            ) : selectedPatient ? (
-              <div style={{ padding: '12px', borderRadius: 'var(--radius)', backgroundColor: 'var(--success-light)', color: 'var(--success)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.875rem' }}>
-                <div>
-                  <strong style={{ display: 'block' }}>{selectedPatient.name}</strong>
-                  <span style={{ fontSize: '0.75rem' }}>{selectedPatient.phone}</span>
-                </div>
-                <button type="button" onClick={() => setSelectedPatient(null)} style={{ background: 'none', border: 'none', color: 'var(--success)', cursor: 'pointer', fontSize: '0.75rem', textDecoration: 'underline' }}>
-                  Change
-                </button>
-              </div>
-            ) : (
-              <div style={{ padding: '12px', borderRadius: 'var(--radius)', border: '1px dashed var(--border-color)', backgroundColor: 'var(--bg-secondary)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <div className="flex justify-between items-center">
-                  <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>New Patient Details</span>
-                  <button type="button" onClick={() => setIsNewPatient(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.75rem' }}>
-                    Search Instead
-                  </button>
-                </div>
-                <Input
-                  placeholder="Patient Full Name"
-                  required
-                  value={newPatientForm.name}
-                  onChange={(e) => setNewPatientForm({ ...newPatientForm, name: e.target.value })}
-                />
-                <div className="grid grid-cols-2 gap-4">
-                  <Input
-                    placeholder="Phone Number"
-                    required
-                    value={newPatientForm.phone}
-                    onChange={(e) => setNewPatientForm({ ...newPatientForm, phone: e.target.value })}
-                  />
-                  <Input
-                    placeholder="Email Address"
-                    type="email"
-                    value={newPatientForm.email}
-                    onChange={(e) => setNewPatientForm({ ...newPatientForm, email: e.target.value })}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Doctor Assignment */}
-          <div style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '16px' }}>
-            <h4 style={{ fontSize: '0.9rem', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <User size={16} style={{ color: 'var(--primary)' }} />
-              <span>Dentist Assignment</span>
-            </h4>
-            <select
-              value={bookingDoctorId}
-              onChange={(e) => setBookingDoctorId(e.target.value)}
-              className="input"
-              required
-            >
-              {doctors.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name} ({d.specialty})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Date & Duration */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>
-                Appointment Date *
-              </label>
-              <Input
-                type="date"
-                value={bookingDate || todayStr}
-                onChange={(e) => setBookingDate(e.target.value)}
-                required
-              />
-            </div>
-            <div>
-              <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>
-                Duration (Minutes) *
-              </label>
-              <select
-                value={bookingDuration}
-                onChange={(e) => setBookingDuration(Number(e.target.value))}
-                className="input"
-              >
-                <option value={15}>15 Minutes</option>
-                <option value={30}>30 Minutes</option>
-                <option value={45}>45 Minutes</option>
-                <option value={60}>60 Minutes (1 Hour)</option>
-                <option value={90}>90 Minutes (1.5 Hours)</option>
-                <option value={120}>120 Minutes (2 Hours)</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Practitioner Available Time Slots Grid */}
-          <div>
-            <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block', marginBottom: '6px', fontWeight: 600 }}>
-              Practitioner Available Time Slots
-            </label>
-            {loadingDashboardSlots ? (
-              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: 0, fontStyle: 'italic' }}>
-                Loading doctor availability slots...
-              </p>
-            ) : dashboardAvailableSlots.length > 0 ? (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', maxHeight: '180px', overflowY: 'auto', paddingRight: '4px' }}>
-                {dashboardAvailableSlots.map((slot) => {
-                  const isSelected = bookingTime === slot.time;
-                  return (
-                    <button
-                      key={slot.time}
-                      type="button"
-                      disabled={!slot.available}
-                      onClick={() => setBookingTime(slot.time)}
-                      style={{
-                        padding: '6px 8px',
-                        borderRadius: '4px',
-                        fontSize: '0.75rem',
-                        fontWeight: isSelected ? 600 : 400,
-                        border: isSelected
-                          ? '1.5px solid var(--primary)'
-                          : slot.available
-                          ? '1px solid var(--border-color)'
-                          : '1px solid transparent',
-                        backgroundColor: isSelected
-                          ? 'var(--primary-light, rgba(99, 102, 241, 0.15))'
-                          : slot.available
-                          ? 'var(--bg-secondary)'
-                          : 'var(--bg-tertiary, rgba(255,255,255,0.04))',
-                        color: isSelected
-                          ? 'var(--primary)'
-                          : slot.available
-                          ? 'var(--text-primary)'
-                          : 'var(--text-muted)',
-                        cursor: slot.available ? 'pointer' : 'not-allowed',
-                        opacity: slot.available ? 1 : 0.45,
-                        textDecoration: slot.available ? 'none' : 'line-through',
-                        transition: 'all 0.15s ease',
-                      }}
-                    >
-                      {slot.time}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: 0, fontStyle: 'italic' }}>
-                No open slots available on selected date (Practitioner closed or fully booked).
-              </p>
-            )}
-          </div>
-
-          <Button type="submit" disabled={bookingSubmitting} style={{ marginTop: '8px', width: '100%' }}>
-            {bookingSubmitting ? 'Booking...' : 'Book Appointment Slot'}
-          </Button>
-        </form>
-      </Modal>
 
       {/* ── APPOINTMENT DETAIL MODAL (DASHBOARD) ── */}
       <Modal isOpen={showDetailModal} onClose={() => setShowDetailModal(false)} title="Appointment Details">
@@ -1260,12 +1123,20 @@ export const DashboardHome: React.FC = () => {
               <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 4px' }}>
                 📞 {selectedAppointment.patientPhone}
               </p>
-              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: 0 }}>
+              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 4px' }}>
                 👨‍⚕️ Provider: <strong>{selectedAppointment.doctorName}</strong>
               </p>
-              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '4px 0 0' }}>
+              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 4px' }}>
                 📅 Scheduled: <strong>{selectedAppointment.date} at {selectedAppointment.time} ({selectedAppointment.durationMinutes || 30} mins)</strong>
               </p>
+              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 4px' }}>
+                🩺 Reason: <strong>{getAppointmentReasonLabel(selectedAppointment.appointmentType)}</strong>
+              </p>
+              {selectedAppointment.notes && (
+                <p style={{ fontSize: '0.825rem', color: 'var(--text-secondary)', margin: '8px 0 0', padding: '8px', backgroundColor: 'var(--bg-primary)', borderRadius: 'var(--radius)', border: '1px solid var(--border-color)', whiteSpace: 'pre-wrap' }}>
+                  {selectedAppointment.notes}
+                </p>
+              )}
             </div>
 
             <div style={{ display: 'flex', gap: '8px' }}>

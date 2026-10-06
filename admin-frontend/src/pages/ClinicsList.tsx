@@ -1,7 +1,7 @@
 /**
  * Admin Clinics & Tenants Management Page (0ms Instant-Render with SWR)
  *
- * Full cross-tenant clinic table: view details, suspend, activate, search.
+ * Full cross-tenant clinic table: view details, suspend, activate, force logout, search.
  * Uses real PostgreSQL database records exclusively.
  */
 
@@ -15,6 +15,8 @@ import {
   Stethoscope,
   Calendar,
   AlertTriangle,
+  LogOut,
+  CheckCircle2,
 } from 'lucide-react';
 import { adminApiClient } from '../services/adminApiClient';
 import { adminFrontendCache } from '../services/adminCacheService';
@@ -56,6 +58,13 @@ export const ClinicsList: React.FC<{ onSelectClinic: (id: string) => void }> = (
 
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Force Logout Modal State
+  const [logoutTarget, setLogoutTarget] = useState<ClinicItem | null>(null);
+  const [logoutReason, setLogoutReason] = useState('');
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
 
   const fetchClinics = useCallback(async (force = false) => {
     if (!clinics.length || force) {
@@ -149,6 +158,36 @@ export const ClinicsList: React.FC<{ onSelectClinic: (id: string) => void }> = (
     }
   };
 
+  const handleForceLogoutSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!logoutTarget) return;
+
+    setLoggingOut(true);
+    setLogoutError(null);
+
+    try {
+      const res = await adminApiClient.post(`/clinics/${logoutTarget.id}/force-logout`, {
+        reason: logoutReason.trim() || 'Super Admin initiated clinic force-logout',
+      });
+      const data = res.data?.data;
+      setSuccessMessage(
+        data?.message || `Successfully terminated active session(s) for ${logoutTarget.name}.`
+      );
+      setTimeout(() => setSuccessMessage(null), 6000);
+      setLogoutTarget(null);
+      setLogoutReason('');
+      adminFrontendCache.invalidate();
+      await fetchClinics(true);
+    } catch (err: any) {
+      setLogoutError(
+        err?.response?.data?.error?.message ||
+        'Failed to log out clinic sessions. Please check server logs.'
+      );
+    } finally {
+      setLoggingOut(false);
+    }
+  };
+
   // Provision Modal State
   const [showModal, setShowModal] = useState(false);
   const [formName, setFormName] = useState('');
@@ -195,7 +234,7 @@ export const ClinicsList: React.FC<{ onSelectClinic: (id: string) => void }> = (
             Clinics & Tenant Accounts
           </h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginTop: '4px' }}>
-            Cross-tenant governance: inspect activity, manage active state, and provision new dental clinics.
+            Cross-tenant governance: inspect activity, manage active state, force logout sessions, and provision new dental clinics.
           </p>
         </div>
 
@@ -211,6 +250,32 @@ export const ClinicsList: React.FC<{ onSelectClinic: (id: string) => void }> = (
           </button>
         </div>
       </div>
+
+      {/* Success Notification Banner */}
+      {successMessage && (
+        <div
+          style={{
+            padding: '12px 16px',
+            borderRadius: '8px',
+            backgroundColor: 'rgba(16, 185, 129, 0.15)',
+            border: '1px solid rgba(16, 185, 129, 0.3)',
+            color: '#34D399',
+            fontSize: '0.85rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+          }}
+        >
+          <CheckCircle2 size={16} />
+          <span>{successMessage}</span>
+          <button
+            style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#34D399', cursor: 'pointer', fontSize: '0.8rem' }}
+            onClick={() => setSuccessMessage(null)}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Action Error */}
       {actionError && (
@@ -335,7 +400,7 @@ export const ClinicsList: React.FC<{ onSelectClinic: (id: string) => void }> = (
                     </span>
                   </td>
                   <td>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} onClick={(e) => e.stopPropagation()}>
                       <button
                         className={`btn ${clinic.status === 'active' ? 'btn-danger' : 'btn-success'} btn-sm`}
                         onClick={(e) => handleToggleStatus(clinic, e)}
@@ -348,6 +413,29 @@ export const ClinicsList: React.FC<{ onSelectClinic: (id: string) => void }> = (
                             ? 'Suspend'
                             : 'Activate'}
                       </button>
+
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setLogoutTarget(clinic);
+                          setLogoutReason('');
+                          setLogoutError(null);
+                        }}
+                        title="Force logout all active users and terminate sessions for this clinic"
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          color: 'var(--warning)',
+                          borderColor: 'rgba(245, 158, 11, 0.3)',
+                          backgroundColor: 'rgba(245, 158, 11, 0.08)',
+                        }}
+                      >
+                        <LogOut size={13} />
+                        <span>Logout</span>
+                      </button>
+
                       <ChevronRight size={16} style={{ color: 'var(--text-muted)' }} />
                     </div>
                   </td>
@@ -378,6 +466,125 @@ export const ClinicsList: React.FC<{ onSelectClinic: (id: string) => void }> = (
           >
             Next
           </button>
+        </div>
+      )}
+
+      {/* Force Logout Confirmation Modal */}
+      {logoutTarget && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.75)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999,
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !loggingOut) setLogoutTarget(null);
+          }}
+        >
+          <div className="glass-card" style={{ width: '100%', maxWidth: '480px', padding: '28px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+              <div
+                style={{
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '10px',
+                  backgroundColor: 'rgba(245, 158, 11, 0.15)',
+                  color: 'var(--warning)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                }}
+              >
+                <LogOut size={20} />
+              </div>
+              <div>
+                <h2 style={{ fontSize: '1.15rem', fontWeight: 800, color: 'var(--text-primary)', margin: 0 }}>
+                  Force Logout Clinic
+                </h2>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>
+                  Terminate all active sessions for {logoutTarget.name}
+                </p>
+              </div>
+            </div>
+
+            {logoutError && (
+              <div
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  color: '#F87171',
+                  fontSize: '0.83rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  marginBottom: '16px',
+                }}
+              >
+                <AlertTriangle size={16} /> {logoutError}
+              </div>
+            )}
+
+            <div
+              style={{
+                padding: '12px 14px',
+                borderRadius: '8px',
+                backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                border: '1px solid rgba(245, 158, 11, 0.25)',
+                color: '#FBBF24',
+                fontSize: '0.83rem',
+                lineHeight: 1.4,
+                marginBottom: '16px',
+              }}
+            >
+              <strong>Warning:</strong> This action will immediately revoke all active sessions and invalidate JWT access tokens for every staff member and practitioner in <strong>{logoutTarget.name}</strong>. They will be logged out on their next request.
+            </div>
+
+            <form onSubmit={handleForceLogoutSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                  Reason for Force Logout (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={logoutReason}
+                  onChange={(e) => setLogoutReason(e.target.value)}
+                  placeholder="e.g. Security credential rotation, admin request..."
+                  className="input"
+                />
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '8px' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setLogoutTarget(null)}
+                  disabled={loggingOut}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn"
+                  disabled={loggingOut}
+                  style={{
+                    backgroundColor: '#D97706',
+                    color: 'white',
+                    fontWeight: 700,
+                  }}
+                >
+                  {loggingOut ? 'Terminating Sessions…' : 'Confirm Force Logout'}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 

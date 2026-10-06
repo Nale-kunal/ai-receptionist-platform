@@ -61,13 +61,36 @@ const adminEnvSchema = z.object({
     (v) => (v ? parseInt(v as string, 10) : 3001),
     z.number().int().min(1).max(65535)
   ),
-  DATABASE_URL: z.string().url(),
+  DATABASE_URL: z.string().url().refine(val => {
+    try {
+      const parsed = new URL(val);
+      return (parsed.protocol === 'postgresql:' || parsed.protocol === 'postgres:') && Boolean(parsed.hostname);
+    } catch {
+      return false;
+    }
+  }, {
+    message: "DATABASE_URL must be a valid PostgreSQL connection URL"
+  }),
+  DIRECT_URL: z.string().url().optional().refine(val => {
+    if (!val) return true;
+    try {
+      const parsed = new URL(val);
+      return (parsed.protocol === 'postgresql:' || parsed.protocol === 'postgres:') && Boolean(parsed.hostname);
+    } catch {
+      return false;
+    }
+  }, {
+    message: "DIRECT_URL must be a valid PostgreSQL connection URL"
+  }),
   ADMIN_JWT_ACCESS_SECRET: secretSchema,
   ADMIN_JWT_REFRESH_SECRET: secretSchema,
   CORS_ADMIN_ORIGIN: z.string().default('http://localhost:5174'),
   SUPER_ADMIN_INITIAL_EMAIL: z.string().email().optional(),
   SUPER_ADMIN_INITIAL_PASSWORD: z.string().min(12).optional(),
   SUPER_ADMIN_INITIAL_DISPLAY_NAME: z.string().min(1).default('Platform Admin'),
+  // ── WhatsApp Technical Validation & Subscription ──────────────────────────
+  WHATSAPP_ACCESS_TOKEN: z.string().optional(),
+  WHATSAPP_API_VERSION: z.string().default('v21.0'),
 });
 
 export type AdminEnv = z.infer<typeof adminEnvSchema>;
@@ -78,10 +101,12 @@ export function validateAdminEnv(): AdminEnv {
       NODE_ENV: 'test',
       ADMIN_PORT: 3001,
       DATABASE_URL: 'postgresql://postgres:pass@localhost:5432/db',
+      DIRECT_URL: 'postgresql://postgres:pass@localhost:5432/db',
       ADMIN_JWT_ACCESS_SECRET: 'test-admin-access-secret-must-be-long-enough',
       ADMIN_JWT_REFRESH_SECRET: 'test-admin-refresh-secret-must-be-long-enough',
       CORS_ADMIN_ORIGIN: '*',
       SUPER_ADMIN_INITIAL_DISPLAY_NAME: 'Platform Admin',
+      WHATSAPP_API_VERSION: 'v21.0',
     };
   }
 

@@ -19,6 +19,7 @@ export interface CreateAppointmentParams {
   timezone: string;
   source: AppointmentSource;
   appointmentType?: string;
+  otherReason?: string;
   durationMinutes?: number;
   notes?: string | null;
 
@@ -71,6 +72,7 @@ export interface ListAppointmentsParams {
   page?: number;
   limit?: number;
   offset?: number;
+  includeDeleted?: boolean;
 }
 
 export interface PaginatedAppointmentsResponse {
@@ -91,6 +93,8 @@ export interface IAppointmentService {
   rescheduleAppointment(params: RescheduleAppointmentParams): Promise<SafeAppointment>;
   cancelAppointment(params: CancelAppointmentParams): Promise<SafeAppointment>;
   confirmAppointment(id: string, tenantId: string, actorId: string, requestId: string): Promise<SafeAppointment>;
+  checkInAppointment(id: string, tenantId: string, actorId: string, requestId: string): Promise<SafeAppointment>;
+  startAppointment(id: string, tenantId: string, actorId: string, requestId: string): Promise<SafeAppointment>;
   completeAppointment(id: string, tenantId: string, actorId: string, requestId: string): Promise<SafeAppointment>;
   markNoShow(id: string, tenantId: string, actorId: string, requestId: string): Promise<SafeAppointment>;
   getAppointmentById(id: string, tenantId: string): Promise<SafeAppointment>;
@@ -194,8 +198,16 @@ export interface IAppointmentRepository {
   /** Fetch doctor status to verify it is active */
   getDoctorStatus(doctorId: string): Promise<string | null>;
 
-  /** Fetch doctor details including workingHours and leaves */
-  getDoctorDetails(doctorId: string): Promise<{ id: string; status: string; workingHours: any; leaves: any } | null>;
+  /** Fetch doctor details including workingHours, leaves, and clinic timezone */
+  getDoctorDetails(doctorId: string): Promise<{
+    id: string;
+    status: string;
+    workingHours: any;
+    leaves: any;
+    clinicId?: string;
+    tenantId?: string;
+    clinic?: { id: string; timezone: string } | null;
+  } | null>;
 
   /** Fetch patient status to verify it is active */
   getPatientStatus(patientId: string): Promise<string | null>;
@@ -205,4 +217,35 @@ export interface IAppointmentRepository {
 
   /** Fetch main clinic for tenant */
   findMainClinicForTenant(tenantId: string): Promise<unknown | null>;
+
+  /** Atomic creation inside transaction with row lock */
+  createWithAtomicConflictCheck?(data: {
+    tenantId: string;
+    clinicId: string;
+    doctorId: string;
+    patientId: string;
+    startTime: Date;
+    endTime: Date;
+    timezone: string;
+    status: AppointmentStatus;
+    source: AppointmentSource;
+    appointmentType?: string;
+    durationMinutes?: number;
+    notes?: string | null;
+  }): Promise<unknown>;
+
+  /** Atomic reschedule inside transaction with row lock */
+  rescheduleWithAtomicConflictCheck?(
+    id: string,
+    data: {
+      tenantId: string;
+      doctorId: string;
+      clinicId: string;
+      startTime: Date;
+      endTime: Date;
+      durationMinutes?: number;
+      timezone?: string;
+      notes?: string | null;
+    }
+  ): Promise<unknown>;
 }

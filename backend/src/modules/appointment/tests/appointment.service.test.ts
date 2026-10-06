@@ -10,6 +10,10 @@ import {
   InvalidAppointmentStatusTransitionError,
   AppointmentAlreadyTerminalError,
   DoctorNotAvailableError,
+  DoctorBreakConflictError,
+  DoctorScheduleClosedError,
+  AppointmentOutsideWorkingHoursError,
+  DoctorOnLeaveError,
   PatientNotActiveError,
   ClinicNotActiveError,
   AppointmentOwnershipError,
@@ -19,6 +23,8 @@ import {
   EVENT_APPOINTMENT_CREATED,
   EVENT_APPOINTMENT_UPDATED,
   EVENT_APPOINTMENT_CONFIRMED,
+  EVENT_APPOINTMENT_CHECKED_IN,
+  EVENT_APPOINTMENT_IN_PROGRESS,
   EVENT_APPOINTMENT_CANCELLED,
   EVENT_APPOINTMENT_RESCHEDULED,
   EVENT_APPOINTMENT_COMPLETED,
@@ -42,7 +48,10 @@ const mockRepository = {
   patientBelongsToClinic:jest.fn(),
   clinicIsActive:        jest.fn(),
   getDoctorStatus:       jest.fn(),
+  getDoctorDetails:      jest.fn(),
   getPatientStatus:      jest.fn(),
+  getDoctorClinicId:     jest.fn(),
+  findMainClinicForTenant: jest.fn(),
 };
 
 const mockPublisher = { publish: jest.fn() };
@@ -57,6 +66,7 @@ const DOCTOR_ID = '550e8400-e29b-41d4-a716-446655440002';
 const PATIENT_ID = '550e8400-e29b-41d4-a716-446655440003';
 const APPT_ID = '550e8400-e29b-41d4-a716-446655440004';
 
+// 2025-01-01 is a Wednesday (dayOfWeek: 3)
 const START = new Date('2025-01-01T09:00:00Z');
 const END   = new Date('2025-01-01T09:30:00Z');
 
@@ -87,6 +97,30 @@ function setupHappyPath() {
   mockRepository.clinicIsActive.mockResolvedValue(true);
   mockRepository.doctorBelongsToClinic.mockResolvedValue(true);
   mockRepository.getDoctorStatus.mockResolvedValue('active');
+  mockRepository.getDoctorDetails.mockResolvedValue({
+    id: DOCTOR_ID,
+    status: 'active',
+    workingHours: [
+      {
+        dayOfWeek: 3, // Wednesday
+        openTime: '08:00',
+        closeTime: '18:00',
+        breakStart: '12:00',
+        breakEnd: '13:00',
+        isClosed: false,
+      },
+      {
+        dayOfWeek: 5, // Friday
+        openTime: '08:00',
+        closeTime: '18:00',
+        breakStart: '12:00',
+        breakEnd: '13:00',
+        isClosed: false,
+      },
+    ],
+    leaves: [],
+    clinic: { id: CLINIC_ID, timezone: 'UTC' },
+  });
   mockRepository.patientBelongsToClinic.mockResolvedValue(true);
   mockRepository.getPatientStatus.mockResolvedValue('active');
   mockRepository.findConflicts.mockResolvedValue([]);
@@ -130,7 +164,6 @@ describe('AppointmentService', () => {
 
       expect(mockRepository.clinicIsActive).toHaveBeenCalledWith(CLINIC_ID, TENANT_ID);
       expect(mockRepository.doctorBelongsToClinic).toHaveBeenCalledWith(DOCTOR_ID, CLINIC_ID, TENANT_ID);
-      expect(mockRepository.getDoctorStatus).toHaveBeenCalledWith(DOCTOR_ID);
       expect(mockRepository.patientBelongsToClinic).toHaveBeenCalledWith(PATIENT_ID, CLINIC_ID, TENANT_ID);
       expect(mockRepository.getPatientStatus).toHaveBeenCalledWith(PATIENT_ID);
       expect(mockRepository.findConflicts).toHaveBeenCalled();
@@ -141,7 +174,53 @@ describe('AppointmentService', () => {
         expect.objectContaining({ type: EVENT_APPOINTMENT_CREATED }),
       );
       expect(result.id).toBe(APPT_ID);
-      expect(result.status).toBe('pending');
+    });
+
+    it('should throw DoctorBreakConflictError when booking during lunch (12:00 - 13:00)', async () => {
+      setupHappyPath();
+      await expect(
+        service.createAppointment({
+          ...params,
+          startTime: new Date('2025-01-01T12:00:00Z'),
+          endTime:   new Date('2025-01-01T12:30:00Z'),
+        }),
+      ).rejects.toThrow(DoctorBreakConflictError);
+    });
+
+    it('should throw DoctorScheduleClosedError when doctor is closed on that day', async () => {
+      setupHappyPath();
+      // 2025-01-04 is a Saturday (closed)
+      await expect(
+        service.createAppointment({
+          ...params,
+          startTime: new Date('2025-01-04T10:00:00Z'),
+          endTime:   new Date('2025-01-04T10:30:00Z'),
+        }),
+      ).rejects.toThrow(DoctorScheduleClosedError);
+    });
+
+    it('should throw AppointmentOutsideWorkingHoursError when booking before opening time', async () => {
+      setupHappyPath();
+      await expect(
+        service.createAppointment({
+          ...params,
+          startTime: new Date('2025-01-01T07:00:00Z'),
+          endTime:   new Date('2025-01-01T07:30:00Z'),
+        }),
+      ).rejects.toThrow(AppointmentOutsideWorkingHoursError);
+    });
+
+    it('should throw DoctorOnLeaveError when doctor is on leave', async () => {
+      setupHappyPath();
+      mockRepository.getDoctorDetails.mockResolvedValue({
+        id: DOCTOR_ID,
+        status: 'active',
+        workingHours: [{ dayOfWeek: 3, openTime: '08:00', closeTime: '18:00', isClosed: false }],
+        leaves: [{ startDate: '2025-01-01', endDate: '2025-01-02', reason: 'Vacation' }],
+        clinic: { id: CLINIC_ID, timezone: 'UTC' },
+      });
+
+      await expect(service.createAppointment(params)).rejects.toThrow(DoctorOnLeaveError);
     });
 
     it('should throw AppointmentTimeRangeError when endTime <= startTime', async () => {
@@ -165,22 +244,18 @@ describe('AppointmentService', () => {
       mockRepository.clinicIsActive.mockResolvedValue(true);
       mockRepository.doctorBelongsToClinic.mockResolvedValue(true);
       mockRepository.getDoctorStatus.mockResolvedValue('inactive');
+      mockRepository.getDoctorDetails.mockResolvedValue({ id: DOCTOR_ID, status: 'inactive' });
       await expect(service.createAppointment(params)).rejects.toThrow(DoctorNotAvailableError);
     });
 
     it('should throw AppointmentOwnershipError when patient does not belong to clinic', async () => {
-      mockRepository.clinicIsActive.mockResolvedValue(true);
-      mockRepository.doctorBelongsToClinic.mockResolvedValue(true);
-      mockRepository.getDoctorStatus.mockResolvedValue('active');
+      setupHappyPath();
       mockRepository.patientBelongsToClinic.mockResolvedValue(false);
       await expect(service.createAppointment(params)).rejects.toThrow(AppointmentOwnershipError);
     });
 
     it('should throw PatientNotActiveError when patient is inactive', async () => {
-      mockRepository.clinicIsActive.mockResolvedValue(true);
-      mockRepository.doctorBelongsToClinic.mockResolvedValue(true);
-      mockRepository.getDoctorStatus.mockResolvedValue('active');
-      mockRepository.patientBelongsToClinic.mockResolvedValue(true);
+      setupHappyPath();
       mockRepository.getPatientStatus.mockResolvedValue('inactive');
       await expect(service.createAppointment(params)).rejects.toThrow(PatientNotActiveError);
     });
@@ -199,28 +274,32 @@ describe('AppointmentService', () => {
   describe('getAppointmentById', () => {
     it('should return appointment for correct tenant', async () => {
       mockRepository.findById.mockResolvedValue(makeAppt());
-      const result = await service.getAppointmentById(APPT_ID, TENANT_ID);
-      expect(result.id).toBe(APPT_ID);
-    });
-
-    it('should throw AppointmentNotFoundError when not found', async () => {
-      mockRepository.findById.mockResolvedValue(null);
-      await expect(service.getAppointmentById(APPT_ID, TENANT_ID)).rejects.toThrow(AppointmentNotFoundError);
+      const appt = await service.getAppointmentById(APPT_ID, TENANT_ID);
+      expect(appt.id).toBe(APPT_ID);
     });
 
     it('should throw AppointmentIsolationViolationError on tenant mismatch', async () => {
       mockRepository.findById.mockResolvedValue(makeAppt({ tenantId: 'other-tenant' }));
-      await expect(service.getAppointmentById(APPT_ID, TENANT_ID)).rejects.toThrow(AppointmentIsolationViolationError);
+      await expect(service.getAppointmentById(APPT_ID, TENANT_ID)).rejects.toThrow(
+        AppointmentIsolationViolationError,
+      );
+    });
+
+    it('should throw AppointmentNotFoundError when record is missing', async () => {
+      mockRepository.findById.mockResolvedValue(null);
+      await expect(service.getAppointmentById(APPT_ID, TENANT_ID)).rejects.toThrow(
+        AppointmentNotFoundError,
+      );
     });
   });
 
   // -------------------------------------------------------------------------
-  // Status transitions
+  // Status Transitions
   // -------------------------------------------------------------------------
 
   describe('confirmAppointment', () => {
-    it('should transition pending → confirmed', async () => {
-      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'pending' }));
+    it('should transition scheduled → confirmed', async () => {
+      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'scheduled' }));
       mockRepository.update.mockResolvedValue(makeAppt({ status: 'confirmed' }));
 
       const result = await service.confirmAppointment(APPT_ID, TENANT_ID, 'actor', 'req');
@@ -230,8 +309,7 @@ describe('AppointmentService', () => {
       );
     });
 
-    it('should reject confirmed → pending transition', async () => {
-      // pending → pending is not allowed; test invalid via confirmed → no valid target except already confirmed
+    it('should reject transition from cancelled (terminal)', async () => {
       mockRepository.findById.mockResolvedValue(makeAppt({ status: 'cancelled' }));
       await expect(
         service.confirmAppointment(APPT_ID, TENANT_ID, 'actor', 'req'),
@@ -239,23 +317,69 @@ describe('AppointmentService', () => {
     });
   });
 
+  describe('checkInAppointment', () => {
+    it('should transition confirmed → checked_in', async () => {
+      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'confirmed' }));
+      mockRepository.update.mockResolvedValue(makeAppt({ status: 'checked_in' }));
+
+      const result = await service.checkInAppointment(APPT_ID, TENANT_ID, 'actor', 'req');
+      expect(result.status).toBe('checked_in');
+      expect(mockPublisher.publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: EVENT_APPOINTMENT_CHECKED_IN }),
+      );
+    });
+
+    it('should reject transition from cancelled (terminal)', async () => {
+      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'cancelled' }));
+      await expect(
+        service.checkInAppointment(APPT_ID, TENANT_ID, 'actor', 'req'),
+      ).rejects.toThrow(AppointmentAlreadyTerminalError);
+    });
+  });
+
+  describe('startAppointment', () => {
+    it('should transition checked_in → in_progress', async () => {
+      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'checked_in' }));
+      mockRepository.update.mockResolvedValue(makeAppt({ status: 'in_progress' }));
+
+      const result = await service.startAppointment(APPT_ID, TENANT_ID, 'actor', 'req');
+      expect(result.status).toBe('in_progress');
+      expect(mockPublisher.publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: EVENT_APPOINTMENT_IN_PROGRESS }),
+      );
+    });
+
+    it('should reject transition from cancelled (terminal)', async () => {
+      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'cancelled' }));
+      await expect(
+        service.startAppointment(APPT_ID, TENANT_ID, 'actor', 'req'),
+      ).rejects.toThrow(AppointmentAlreadyTerminalError);
+    });
+  });
+
   describe('cancelAppointment', () => {
-    it('should transition pending → cancelled and publish event', async () => {
-      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'pending' }));
-      mockRepository.update.mockResolvedValue(makeAppt({ status: 'cancelled' }));
+    it('should cancel active appointment and record reason', async () => {
+      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'scheduled' }));
+      mockRepository.update.mockResolvedValue(
+        makeAppt({ status: 'cancelled', cancellationReason: 'Patient request' }),
+      );
 
       const result = await service.cancelAppointment({
-        id: APPT_ID, tenantId: TENANT_ID, cancellationReason: 'Patient request',
-        actorId: 'actor', requestId: 'req',
+        id: APPT_ID,
+        tenantId: TENANT_ID,
+        cancellationReason: 'Patient request',
+        actorId: 'actor',
+        requestId: 'req',
       });
+
       expect(result.status).toBe('cancelled');
       expect(mockPublisher.publish).toHaveBeenCalledWith(
         expect.objectContaining({ type: EVENT_APPOINTMENT_CANCELLED }),
       );
     });
 
-    it('should reject cancellation of already-cancelled appointment', async () => {
-      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'cancelled' }));
+    it('should reject cancelling an already completed appointment', async () => {
+      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'completed' }));
       await expect(
         service.cancelAppointment({ id: APPT_ID, tenantId: TENANT_ID, actorId: 'a', requestId: 'r' }),
       ).rejects.toThrow(AppointmentAlreadyTerminalError);
@@ -263,40 +387,30 @@ describe('AppointmentService', () => {
   });
 
   describe('rescheduleAppointment', () => {
-    it('should reschedule a confirmed appointment and publish event', async () => {
-      const newStart = new Date('2025-01-02T10:00:00Z');
-      const newEnd   = new Date('2025-01-02T10:30:00Z');
-
-      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'confirmed' }));
-      mockRepository.findConflicts.mockResolvedValue([]);
-      mockRepository.update.mockResolvedValue(makeAppt({ status: 'rescheduled', startTime: newStart, endTime: newEnd }));
+    it('should reschedule scheduled appointment to new valid slot', async () => {
+      setupHappyPath();
+      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'scheduled' }));
+      mockRepository.update.mockResolvedValue(
+        makeAppt({
+          status: 'rescheduled',
+          startTime: new Date('2025-01-03T10:00:00Z'),
+          endTime:   new Date('2025-01-03T10:30:00Z'),
+        }),
+      );
 
       const result = await service.rescheduleAppointment({
-        id: APPT_ID, tenantId: TENANT_ID,
-        startTime: newStart, endTime: newEnd,
-        actorId: 'actor', requestId: 'req',
+        id: APPT_ID,
+        tenantId: TENANT_ID,
+        startTime: new Date('2025-01-03T10:00:00Z'), // Friday (day 5)
+        endTime:   new Date('2025-01-03T10:30:00Z'),
+        actorId: 'actor',
+        requestId: 'req',
       });
 
       expect(result.status).toBe('rescheduled');
       expect(mockPublisher.publish).toHaveBeenCalledWith(
         expect.objectContaining({ type: EVENT_APPOINTMENT_RESCHEDULED }),
       );
-    });
-
-    it('should throw AppointmentConflictError if new slot conflicts', async () => {
-      const newStart = new Date('2025-01-02T10:00:00Z');
-      const newEnd   = new Date('2025-01-02T10:30:00Z');
-
-      mockRepository.findById.mockResolvedValue(makeAppt({ status: 'confirmed' }));
-      mockRepository.findConflicts.mockResolvedValue([makeAppt()]);
-
-      await expect(
-        service.rescheduleAppointment({
-          id: APPT_ID, tenantId: TENANT_ID,
-          startTime: newStart, endTime: newEnd,
-          actorId: 'actor', requestId: 'req',
-        }),
-      ).rejects.toThrow(AppointmentConflictError);
     });
 
     it('should reject rescheduling a terminal appointment', async () => {

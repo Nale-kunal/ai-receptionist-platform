@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WhatsApp Tenant Resolver Service
  *
  * Resolves an inbound WhatsApp destination phone number to a specific
@@ -13,7 +13,11 @@
 
 import type { WhatsAppIntegrationRepository } from '../repositories/whatsapp-integration.repository';
 import type { SafeWhatsAppIntegration } from '../interfaces/whatsapp.interfaces';
-import { WhatsAppIntegrationNotFoundError, WhatsAppIntegrationDisabledError } from '../errors/whatsapp.errors';
+import {
+  WhatsAppIntegrationNotFoundError,
+  WhatsAppIntegrationDisabledError,
+  WhatsAppWabaMismatchError,
+} from '../errors/whatsapp.errors';
 
 export interface ResolvedWhatsAppContext {
   integration: SafeWhatsAppIntegration;
@@ -29,15 +33,70 @@ export class WhatsAppTenantResolverService {
   ) {}
 
   /**
-   * Resolve a destination phone number to a clinic/tenant context.
+   * Resolve an inbound Meta WhatsApp event by Meta identifiers:
+   * 1. Match by phone_number_id (unique per Meta phone number)
+   * 2. Verify that the incoming WABA ID matches integration's wabaId
+   * 3. Ensure integration is active and enabled
    *
-   * @param destinationPhone E.164 phone number from Meta payload 'to' field
-   * @throws WhatsAppIntegrationNotFoundError if no integration matches
-   * @throws WhatsAppIntegrationDisabledError if integration is inactive
+   * @param phoneNumberId Meta phone number ID from change.value.metadata.phone_number_id
+   * @param wabaId WhatsApp Business Account ID from entry.id
+   * @param destinationPhone Optional E.164 fallback from change.value.metadata.display_phone_number
+   */
+  public async resolveByMeta(
+    phoneNumberId: string,
+    wabaId: string,
+    destinationPhone?: string,
+  ): Promise<ResolvedWhatsAppContext> {
+    // 1. Resolve by phoneNumberId first (exact Meta identity)
+    let integration = await this.integrationRepo.findByPhoneNumberId(phoneNumberId);
+
+    // 2. Fallback to destination phone number if not resolved by ID
+    if (!integration && destinationPhone) {
+      integration = await this.integrationRepo.findByPhoneNumber(destinationPhone);
+    }
+
+    if (!integration) {
+      throw new WhatsAppIntegrationNotFoundError(phoneNumberId || destinationPhone);
+    }
+
+    // 3. Verify WABA boundary — prevent cross-account injection
+    if (wabaId && integration.wabaId !== wabaId) {
+      throw new WhatsAppWabaMismatchError(integration.wabaId, wabaId);
+    }
+
+    // 4. Verify channel lifecycle state
+    if (!integration.isEnabled || integration.status !== 'active') {
+      throw new WhatsAppIntegrationDisabledError();
+    }
+
+    return {
+      integration,
+      tenantId: integration.tenantId,
+      clinicId: integration.clinicId,
+      integrationId: integration.id,
+      phoneNumberId: integration.phoneNumberId,
+    };
+  }
+
+  /**
+   * Safe resolve by Meta identifiers — returns null on mismatch, not found, or disabled.
+   */
+  public async tryResolveByMeta(
+    phoneNumberId: string,
+    wabaId: string,
+    destinationPhone?: string,
+  ): Promise<ResolvedWhatsAppContext | null> {
+    try {
+      return await this.resolveByMeta(phoneNumberId, wabaId, destinationPhone);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Legacy resolver by destination phone number.
    */
   public async resolve(destinationPhone: string): Promise<ResolvedWhatsAppContext> {
-    // Always query the DB — no caching of integration status
-    // (enables real-time enable/disable without server restart)
     const integration = await this.integrationRepo.findByPhoneNumber(destinationPhone);
 
     if (!integration) {
@@ -59,7 +118,6 @@ export class WhatsAppTenantResolverService {
 
   /**
    * Resolve without throwing — returns null for unresolvable/disabled numbers.
-   * Used in webhook handler to quarantine rather than crash.
    */
   public async tryResolve(destinationPhone: string): Promise<ResolvedWhatsAppContext | null> {
     try {

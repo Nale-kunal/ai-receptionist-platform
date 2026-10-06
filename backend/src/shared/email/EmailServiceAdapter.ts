@@ -41,6 +41,7 @@ export class EmailServiceAdapter implements AuthEmailProvider {
     inviterName: string;
     tenantId?: string;
     clinicId?: string;
+    idempotencyKey?: string;
   }): Promise<void> {
     await this.emailService.sendInvitationEmail({
       to: params.to,
@@ -52,6 +53,7 @@ export class EmailServiceAdapter implements AuthEmailProvider {
       inviteLink: params.inviteLink,
       tenantId: params.tenantId,
       clinicId: params.clinicId,
+      idempotencyKey: params.idempotencyKey,
     });
   }
 }

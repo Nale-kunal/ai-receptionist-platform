@@ -36,6 +36,10 @@ class AvailabilityEventBus {
       }
     });
   }
+
+  public publish(details?: { doctorId?: string; date?: string }): void {
+    this.notifyInvalidated(details);
+  }
 }
 
 export const availabilityBus = AvailabilityEventBus.getInstance();

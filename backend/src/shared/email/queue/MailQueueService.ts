@@ -33,6 +33,31 @@ const BACKOFF_BASE_SECONDS = 5;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const WORKER_ID = `worker_${process.pid}_${Date.now()}`;
 
+// Database outage backoff constants
+const INITIAL_DB_BACKOFF_MS = 2000;
+const MAX_DB_BACKOFF_MS = 60000;
+
+/**
+ * Classifies database connectivity / wake-up / network errors
+ */
+export function isDbConnectivityError(err: unknown): boolean {
+  if (!err) return false;
+  const message = (err as any)?.message || String(err);
+  const code = (err as any)?.code;
+  return (
+    code === 'P1001' || // Can't reach database server
+    code === 'P1002' || // Database server timeout
+    code === 'P1017' || // Server closed connection
+    code === 'P2024' || // Timed out fetching connection from pool
+    message.includes("Can't reach database server") ||
+    message.includes('Connection terminated') ||
+    message.includes('Connection lost') ||
+    message.includes('ECONNREFUSED') ||
+    message.includes('ETIMEDOUT') ||
+    message.includes('ServerHasNoCommands')
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -150,6 +175,9 @@ export class MailQueueService {
   private workerTimer: NodeJS.Timeout | null = null;
   private isProcessing = false;
   private isShuttingDown = false;
+  private isDbUnavailable = false;
+  private consecutiveDbFailures = 0;
+  private currentBackoffMs = 0;
   private deliveredCount = 0;
   private failedCount = 0;
   private totalLatencyMs = 0;
@@ -169,9 +197,17 @@ export class MailQueueService {
    * Call AFTER confirming DB connectivity. Idempotent.
    */
   public async initialize(): Promise<void> {
-    if (this.workerTimer) return;
+    if (this.workerTimer || this.isShuttingDown) return;
     this.lastStaleRecoveryAt = Date.now();
-    await this.recoverStaleLeasedJobs();
+    try {
+      await this.recoverStaleLeasedJobs();
+    } catch (err) {
+      if (isDbConnectivityError(err)) {
+        console.warn('[MailQueueService] Initial stale job recovery deferred (database waking up / reconnecting).');
+      } else {
+        console.warn('[MailQueueService] Stale job recovery skipped on startup:', err);
+      }
+    }
     this.startWorker();
     console.info(
       `[MailQueueService] Initialized. WorkerID=${WORKER_ID} PollInterval=${WORKER_POLL_INTERVAL_MS}ms`,
@@ -281,22 +317,39 @@ export class MailQueueService {
 
   // ---- Worker Lifecycle -------------------------------------------------
 
-  private startWorker(): void {
-    if (this.workerTimer) return;
-    this.workerTimer = setInterval(() => {
+  private scheduleNextTick(delayMs: number): void {
+    if (this.isShuttingDown) return;
+    if (this.workerTimer) {
+      clearTimeout(this.workerTimer);
+      this.workerTimer = null;
+    }
+    this.workerTimer = setTimeout(() => {
       void this.workerTick().catch((err) => {
-        console.error('[MailQueueService] Worker tick error:', err);
+        console.error('[MailQueueService] Unhandled worker tick error:', err);
       });
-    }, WORKER_POLL_INTERVAL_MS);
+    }, delayMs);
+    if (typeof this.workerTimer.unref === 'function') {
+      this.workerTimer.unref();
+    }
+  }
+
+  private startWorker(): void {
+    if (this.workerTimer || this.isShuttingDown) return;
+    this.scheduleNextTick(WORKER_POLL_INTERVAL_MS);
   }
 
   private stopWorker(): void {
-    if (this.workerTimer) { clearInterval(this.workerTimer); this.workerTimer = null; }
+    if (this.workerTimer) {
+      clearTimeout(this.workerTimer);
+      this.workerTimer = null;
+    }
   }
 
   private async workerTick(): Promise<void> {
     if (this.isProcessing || this.isShuttingDown) return;
     this.isProcessing = true;
+    let nextDelayMs = WORKER_POLL_INTERVAL_MS;
+
     try {
       const now = Date.now();
       if (now - this.lastStaleRecoveryAt >= STALE_RECOVERY_INTERVAL_MS) {
@@ -304,8 +357,46 @@ export class MailQueueService {
         await this.recoverStaleLeasedJobs();
       }
       await this.processClaimedJobs();
+
+      // Successful tick: if we were previously in DB backoff, clear it
+      if (this.isDbUnavailable) {
+        this.isDbUnavailable = false;
+        this.consecutiveDbFailures = 0;
+        this.currentBackoffMs = 0;
+        console.info(
+          `[MailQueueService] Database connectivity restored. Resuming normal queue polling (${WORKER_POLL_INTERVAL_MS}ms).`,
+        );
+      }
+    } catch (err: unknown) {
+      if (isDbConnectivityError(err)) {
+        this.consecutiveDbFailures++;
+        const jitter = Math.floor(Math.random() * 500);
+        this.currentBackoffMs = Math.min(
+          INITIAL_DB_BACKOFF_MS * Math.pow(2, Math.min(this.consecutiveDbFailures - 1, 5)) + jitter,
+          MAX_DB_BACKOFF_MS,
+        );
+        nextDelayMs = this.currentBackoffMs;
+
+        if (!this.isDbUnavailable) {
+          this.isDbUnavailable = true;
+          const errMsg = (err as any)?.message || String(err);
+          console.warn(
+            `[MailQueueService] [DATABASE_UNAVAILABLE] PostgreSQL unreachable (${errMsg.substring(0, 120)}). ` +
+            `Entering exponential backoff (attempt ${this.consecutiveDbFailures}, next retry in ${Math.round(nextDelayMs)}ms).`,
+          );
+        } else if (this.consecutiveDbFailures % 5 === 0) {
+          console.warn(
+            `[MailQueueService] [DATABASE_UNAVAILABLE] Waiting for database connectivity (attempt ${this.consecutiveDbFailures}, next retry in ${Math.round(nextDelayMs)}ms)...`,
+          );
+        }
+      } else {
+        console.error('[MailQueueService] Worker tick error:', err);
+      }
     } finally {
       this.isProcessing = false;
+      if (!this.isShuttingDown) {
+        this.scheduleNextTick(nextDelayMs);
+      }
     }
   }
 
@@ -323,6 +414,9 @@ export class MailQueueService {
       );
       for (const job of staleJobs) { await this.recoverSingleStaleJob(job); }
     } catch (err: any) {
+      if (isDbConnectivityError(err)) {
+        throw err;
+      }
       console.warn('[MailQueueService] Stale job recovery skipped:', err?.message || err);
     }
   }
@@ -585,25 +679,40 @@ export class MailQueueService {
   // ---- Metrics & Backward Compatibility --------------------------------
 
   public async getMetrics(): Promise<QueueMetrics> {
-    const [queuedCount, processingCount, deliveredCount, failedCount] = await Promise.all([
-      this.prisma.mailJob.count({ where: { status: 'queued' } }),
-      this.prisma.mailJob.count({ where: { status: 'processing' } }),
-      this.prisma.mailJob.count({ where: { status: 'delivered' } }),
-      this.prisma.mailJob.count({ where: { status: 'failed' } }),
-    ]);
-    const totalProcessed = this.deliveredCount + this.failedCount;
-    return {
-      workerAlive:              this.workerTimer !== null,
-      workerId:                 WORKER_ID,
-      queueDepth:               queuedCount + processingCount,
-      pendingJobs:              queuedCount,
-      processingJobs:           processingCount,
-      failedJobs:               failedCount,
-      deliveredJobs:            deliveredCount,
-      averageLatencyMs:         totalProcessed > 0 ? Math.round(this.totalLatencyMs / totalProcessed) : 0,
-      lastSuccessfulDeliveryAt: this.lastSuccessfulDeliveryAt,
-      lastFailureAt:            this.lastFailureAt,
-    };
+    try {
+      const [queuedCount, processingCount, deliveredCount, failedCount] = await Promise.all([
+        this.prisma.mailJob.count({ where: { status: 'queued' } }),
+        this.prisma.mailJob.count({ where: { status: 'processing' } }),
+        this.prisma.mailJob.count({ where: { status: 'delivered' } }),
+        this.prisma.mailJob.count({ where: { status: 'failed' } }),
+      ]);
+      const totalProcessed = this.deliveredCount + this.failedCount;
+      return {
+        workerAlive:              this.workerTimer !== null && !this.isShuttingDown,
+        workerId:                 WORKER_ID,
+        queueDepth:               queuedCount + processingCount,
+        pendingJobs:              queuedCount,
+        processingJobs:           processingCount,
+        failedJobs:               failedCount,
+        deliveredJobs:            deliveredCount,
+        averageLatencyMs:         totalProcessed > 0 ? Math.round(this.totalLatencyMs / totalProcessed) : 0,
+        lastSuccessfulDeliveryAt: this.lastSuccessfulDeliveryAt,
+        lastFailureAt:            this.lastFailureAt,
+      };
+    } catch {
+      return {
+        workerAlive:              this.workerTimer !== null && !this.isShuttingDown && !this.isDbUnavailable,
+        workerId:                 WORKER_ID,
+        queueDepth:               0,
+        pendingJobs:              0,
+        processingJobs:           0,
+        failedJobs:               0,
+        deliveredJobs:            0,
+        averageLatencyMs:         0,
+        lastSuccessfulDeliveryAt: this.lastSuccessfulDeliveryAt,
+        lastFailureAt:            this.lastFailureAt,
+      };
+    }
   }
 
   /** @deprecated Use getMetrics() -- retained for HealthController backward compatibility. */

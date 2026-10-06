@@ -15,6 +15,16 @@
 import type { PrismaClient } from '@prisma/client';
 import { withDbRetry } from '../../../shared/database/dbRetry';
 import { ACTIVE_APPOINTMENT_STATUSES } from '../../../shared/scheduling/schedulingOverlap';
+import {
+  parseHHmm,
+  formatMinutes,
+  intervalsOverlap,
+  getLocalTimeDetails,
+  DaySchedule,
+  getEffectiveDoctorSchedule,
+  EffectiveDoctorSchedule,
+  dateStringToDayOfWeek,
+} from '../../../shared/scheduling/doctorAvailabilityEngine';
 
 export type UnavailableReasonCode =
   | 'CLINIC_CLOSED'
@@ -28,7 +38,10 @@ export type UnavailableReasonCode =
   | 'OUTSIDE_WORKING_HOURS'
   | 'INSUFFICIENT_DURATION'
   | 'SOFT_RESERVED'
-  | 'MAINTENANCE';
+  | 'MAINTENANCE'
+  | 'DOCTOR_SCHEDULE_CLOSED'
+  | 'DOCTOR_ON_LEAVE'
+  | 'DOCTOR_NOT_AVAILABLE';
 
 export interface TimeSlot {
   time: string;           // "09:00"
@@ -58,64 +71,20 @@ export interface GetAvailabilityParams {
   stepMinutes?: number;
   bufferMinutes?: number;
   timezone?: string;
-  /** Clinic-level business hours from configuration — gates ALL scheduling */
+  /** Clinic-level business hours from configuration — acts as fallback default if doctor has no schedule */
   clinicBusinessHours?: ClinicBusinessHour[];
 }
 
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-function parseHHmm(timeStr: string): number {
-  const [h, m] = (timeStr || '').split(':').map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
-
-function formatMinutes(totalMinutes: number): string {
-  const h = Math.floor(totalMinutes / 60).toString().padStart(2, '0');
-  const m = (totalMinutes % 60).toString().padStart(2, '0');
-  return `${h}:${m}`;
-}
-
 function dateToLocalDateString(dateObj: Date | string, timeZone?: string): string {
   const d = typeof dateObj === 'string' ? new Date(dateObj) : dateObj;
-  if (!timeZone || timeZone === 'UTC') {
-    return d.toISOString().split('T')[0];
-  }
-  try {
-    const formatter = new Intl.DateTimeFormat('en-CA', {
-      timeZone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    });
-    return formatter.format(d);
-  } catch {
-    return d.toISOString().split('T')[0];
-  }
+  return getLocalTimeDetails(d, timeZone).dateStr;
 }
 
 function dateToLocalMinutes(dateObj: Date | string, timeZone?: string): number {
   const d = typeof dateObj === 'string' ? new Date(dateObj) : dateObj;
-  if (!timeZone || timeZone === 'UTC') {
-    return d.getUTCHours() * 60 + d.getUTCMinutes();
-  }
-  try {
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone,
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    });
-    const parts = formatter.formatToParts(d);
-    let hour = 0;
-    let minute = 0;
-    for (const part of parts) {
-      if (part.type === 'hour') hour = parseInt(part.value, 10) % 24;
-      if (part.type === 'minute') minute = parseInt(part.value, 10);
-    }
-    return hour * 60 + minute;
-  } catch {
-    return d.getUTCHours() * 60 + d.getUTCMinutes();
-  }
+  return getLocalTimeDetails(d, timeZone).minutes;
 }
 
 export class AvailabilityService {
@@ -124,18 +93,23 @@ export class AvailabilityService {
   /**
    * Calculates dynamic available slots for a given doctor and date.
    *
-   * Clinic hours (if provided) act as the outer boundary.
-   * Doctor hours further restrict within that boundary.
-   * Duration-aware continuous scanning guarantees that every returned slot
-   * fits the requested durationMinutes without overlapping breaks, leaves, or existing bookings.
+   * Authoritative Hierarchy:
+   * - Doctor-specific weekly schedule is authoritative.
+   * - Clinic hours act as fallback default if doctor has no schedule configured.
+   * - Duration-aware continuous scanning guarantees that every returned slot
+   *   fits the requested durationMinutes without overlapping breaks, leaves, or existing bookings.
    */
   public async getAvailableSlots(params: GetAvailabilityParams): Promise<{
     date: string;
     doctorId: string;
     durationMinutes: number;
     slots: TimeSlot[];
-    workingHours: { start: string; end: string; breakStart?: string; breakEnd?: string };
+    workingHours: { start: string; end: string; breakStart?: string; breakEnd?: string; breaks?: any[] };
     clinicOpen: boolean;
+    isOpen: boolean;
+    status: 'OPEN' | 'DOCTOR_SCHEDULE_CLOSED' | 'DOCTOR_ON_LEAVE' | 'CLINIC_CLOSED' | 'NO_AVAILABLE_SLOTS' | 'DOCTOR_NOT_AVAILABLE';
+    message: string;
+    scheduleSource?: string;
   }> {
     const {
       tenantId,
@@ -147,9 +121,10 @@ export class AvailabilityService {
       stepMinutes = 30,
       bufferMinutes = 0,
       clinicBusinessHours,
+      timezone: inputTimezone,
     } = params;
 
-    // 1. Fetch doctor details with tenant isolation
+    // 1. Fetch doctor details with tenant isolation and clinic timezone
     const doctor = await withDbRetry(() =>
       this.prisma.doctor.findFirst({
         where: {
@@ -158,6 +133,11 @@ export class AvailabilityService {
           status: 'active',
           deletedAt: null,
         },
+        include: {
+          clinic: {
+            select: { id: true, timezone: true },
+          },
+        },
       }),
     );
 
@@ -165,122 +145,32 @@ export class AvailabilityService {
       throw new Error('Doctor not found, inactive, or unassigned.');
     }
 
-    // 2. Determine day of week for target date (0 = Sunday, 1 = Monday, etc.)
-    const targetDate = new Date(date + 'T00:00:00Z');
-    if (isNaN(targetDate.getTime())) {
-      throw new Error('Invalid date format. Expected YYYY-MM-DD.');
-    }
+    const timezone = doctor.clinic?.timezone || inputTimezone || 'UTC';
 
-    const dayOfWeekNum = targetDate.getUTCDay();
-    const dayName = DAY_NAMES[dayOfWeekNum];
+    // 2. Canonical Effective Doctor Schedule Resolution
+    const effectiveSchedule = getEffectiveDoctorSchedule({
+      doctor,
+      date,
+      timezone,
+      clinicBusinessHours,
+    });
 
-    // 3. Resolve clinic operating window for this day
-    let clinicWindow: { start: string; end: string } | null = null;
-
-    if (clinicBusinessHours && clinicBusinessHours.length > 0) {
-      const clinicDay = clinicBusinessHours.find((ch) => ch.dayOfWeek === dayOfWeekNum);
-
-      if (!clinicDay || clinicDay.isClosed) {
-        return {
-          date,
-          doctorId,
-          durationMinutes,
-          slots: [],
-          workingHours: { start: '00:00', end: '00:00' },
-          clinicOpen: false,
-        };
-      }
-
-      clinicWindow = {
-        start: clinicDay.openTime || '09:00',
-        end: clinicDay.closeTime || '17:00',
+    if (!effectiveSchedule.isOpen) {
+      return {
+        date,
+        doctorId,
+        durationMinutes,
+        slots: [],
+        workingHours: effectiveSchedule.workingHours,
+        clinicOpen: effectiveSchedule.clinicOpen,
+        isOpen: false,
+        status: effectiveSchedule.status,
+        message: effectiveSchedule.reason || 'Practitioner is not available on this date.',
+        scheduleSource: effectiveSchedule.scheduleSource,
       };
     }
 
-    // 4. Parse Doctor Working Hours for this day (no forced hardcoded lunch break)
-    let dayWorkingHours: {
-      start: string;
-      end: string;
-      breakStart?: string;
-      breakEnd?: string;
-    } = {
-      start: clinicWindow?.start || '09:00',
-      end: clinicWindow?.end || '17:00',
-      breakStart: undefined,
-      breakEnd: undefined,
-    };
-
-    if (Array.isArray(doctor.workingHours) && (doctor.workingHours as any[]).length > 0) {
-      const matchedDay = (doctor.workingHours as any[]).find((wh) => {
-        if (typeof wh.day === 'string' && wh.day.toLowerCase() === dayName) return true;
-        if (typeof wh.dayOfWeek === 'number' && wh.dayOfWeek === dayOfWeekNum) return true;
-        if (
-          typeof wh.dayOfWeek === 'string' &&
-          (wh.dayOfWeek.toLowerCase() === dayName || parseInt(wh.dayOfWeek, 10) === dayOfWeekNum)
-        )
-          return true;
-        return false;
-      });
-
-      if (matchedDay) {
-        const isOff = matchedDay.isClosed === true || matchedDay.isOff === true || matchedDay.closed === true;
-        if (isOff) {
-          return {
-            date,
-            doctorId,
-            durationMinutes,
-            slots: [],
-            workingHours: { start: '00:00', end: '00:00' },
-            clinicOpen: true,
-          };
-        }
-
-        const doctorStart = matchedDay.openTime || matchedDay.startTime || matchedDay.start || dayWorkingHours.start;
-        const doctorEnd = matchedDay.closeTime || matchedDay.endTime || matchedDay.end || dayWorkingHours.end;
-
-        const effectiveStart = clinicWindow
-          ? formatMinutes(Math.max(parseHHmm(doctorStart), parseHHmm(clinicWindow.start)))
-          : doctorStart;
-        const effectiveEnd = clinicWindow
-          ? formatMinutes(Math.min(parseHHmm(doctorEnd), parseHHmm(clinicWindow.end)))
-          : doctorEnd;
-
-        const isBreakDisabled =
-          matchedDay.hasBreak === false ||
-          matchedDay.noBreak === true ||
-          matchedDay.isBreakDisabled === true ||
-          matchedDay.breakDisabled === true;
-
-        const breakStartRaw =
-          matchedDay.breakStart ||
-          matchedDay.lunchStart ||
-          matchedDay.break_start ||
-          matchedDay.lunch_start ||
-          '12:00';
-        const breakEndRaw =
-          matchedDay.breakEnd ||
-          matchedDay.lunchEnd ||
-          matchedDay.break_end ||
-          matchedDay.lunch_end ||
-          '13:00';
-
-        dayWorkingHours = {
-          start: effectiveStart,
-          end: effectiveEnd,
-          breakStart: isBreakDisabled ? undefined : breakStartRaw,
-          breakEnd: isBreakDisabled ? undefined : breakEndRaw,
-        };
-      } else {
-        return {
-          date,
-          doctorId,
-          durationMinutes,
-          slots: [],
-          workingHours: { start: '00:00', end: '00:00' },
-          clinicOpen: !!clinicWindow,
-        };
-      }
-    }
+    const dayWorkingHours = effectiveSchedule.workingHours;
 
     if (parseHHmm(dayWorkingHours.start) >= parseHHmm(dayWorkingHours.end)) {
       return {
@@ -289,31 +179,12 @@ export class AvailabilityService {
         durationMinutes,
         slots: [],
         workingHours: dayWorkingHours,
-        clinicOpen: !!clinicWindow,
+        clinicOpen: effectiveSchedule.clinicOpen,
+        isOpen: false,
+        status: 'DOCTOR_SCHEDULE_CLOSED',
+        message: 'This dentist is not working on this date.',
+        scheduleSource: effectiveSchedule.scheduleSource,
       };
-    }
-
-    // 5. Check Doctor Leaves & Blackout Dates
-    if (Array.isArray(doctor.leaves)) {
-      const isOnLeave = (doctor.leaves as any[]).some((leave) => {
-        if (typeof leave === 'string' && leave === date) return true;
-        if (leave.date === date) return true;
-        if (leave.startDate && leave.endDate) {
-          return date >= leave.startDate && date <= leave.endDate;
-        }
-        return false;
-      });
-
-      if (isOnLeave) {
-        return {
-          date,
-          doctorId,
-          durationMinutes,
-          slots: [],
-          workingHours: dayWorkingHours,
-          clinicOpen: true,
-        };
-      }
     }
 
     // 6. Query active existing appointments for the doctor covering target date window
@@ -339,15 +210,14 @@ export class AvailabilityService {
     );
 
     // Convert existing DB appointment UTC timestamps to local day minutes for target date
-    const timezoneStr = params.timezone || 'UTC';
     const parsedAppointments = existingAppointments
       .filter((apt) => {
-        const aptDateStr = dateToLocalDateString(apt.startTime, timezoneStr);
+        const aptDateStr = dateToLocalDateString(apt.startTime, timezone);
         return aptDateStr === date;
       })
       .map((apt) => {
-        const startMin = dateToLocalMinutes(apt.startTime, timezoneStr);
-        let endMin = dateToLocalMinutes(apt.endTime, timezoneStr);
+        const startMin = dateToLocalMinutes(apt.startTime, timezone);
+        let endMin = dateToLocalMinutes(apt.endTime, timezone);
         if (endMin <= startMin) endMin = startMin + 30; // Fallback
         return { id: apt.id, startMinutes: startMin, endMinutes: endMin };
       });
@@ -357,15 +227,28 @@ export class AvailabilityService {
     const currentMinutes_start = parseHHmm(dayWorkingHours.start);
     const endMinutes = parseHHmm(dayWorkingHours.end);
 
-    const hasExplicitBreak =
+    // Gather all active breaks
+    const breaksList: Array<{ start: number; end: number; startStr: string; endStr: string }> = [];
+    if (Array.isArray(dayWorkingHours.breaks) && dayWorkingHours.breaks.length > 0) {
+      for (const b of dayWorkingHours.breaks) {
+        if (b.start && b.end && parseHHmm(b.end) > parseHHmm(b.start)) {
+          breaksList.push({ start: parseHHmm(b.start), end: parseHHmm(b.end), startStr: b.start, endStr: b.end });
+        }
+      }
+    } else if (
       typeof dayWorkingHours.breakStart === 'string' &&
       typeof dayWorkingHours.breakEnd === 'string' &&
       dayWorkingHours.breakStart.trim().length > 0 &&
       dayWorkingHours.breakEnd.trim().length > 0 &&
-      parseHHmm(dayWorkingHours.breakEnd) > parseHHmm(dayWorkingHours.breakStart);
-
-    const breakStartMinutes = hasExplicitBreak ? parseHHmm(dayWorkingHours.breakStart!) : -1;
-    const breakEndMinutes = hasExplicitBreak ? parseHHmm(dayWorkingHours.breakEnd!) : -1;
+      parseHHmm(dayWorkingHours.breakEnd) > parseHHmm(dayWorkingHours.breakStart)
+    ) {
+      breaksList.push({
+        start: parseHHmm(dayWorkingHours.breakStart),
+        end: parseHHmm(dayWorkingHours.breakEnd),
+        startStr: dayWorkingHours.breakStart,
+        endStr: dayWorkingHours.breakEnd,
+      });
+    }
 
     let currentMinutes = currentMinutes_start;
     const step = Math.max(5, stepMinutes);
@@ -389,14 +272,15 @@ export class AvailabilityService {
         reasonCode = 'OUTSIDE_WORKING_HOURS';
       }
 
-      // Rule B: Full duration must not overlap explicit lunch break (only if break is configured)
-      if (available && hasExplicitBreak) {
-        const overlapsBreak =
-          slotStartMinutes < breakEndMinutes && slotEndMinutes > breakStartMinutes;
-        if (overlapsBreak) {
-          available = false;
-          reason = `Practitioner Lunch Break (${dayWorkingHours.breakStart} to ${dayWorkingHours.breakEnd})`;
-          reasonCode = 'DOCTOR_BREAK';
+      // Rule B: Full duration must not overlap breaks / lunch periods
+      if (available && breaksList.length > 0) {
+        for (const brk of breaksList) {
+          if (intervalsOverlap(slotStartMinutes, slotEndMinutes, brk.start, brk.end)) {
+            available = false;
+            reason = `Practitioner Lunch Break (${brk.startStr} to ${brk.endStr})`;
+            reasonCode = 'DOCTOR_BREAK';
+            break;
+          }
         }
       }
 
@@ -405,7 +289,7 @@ export class AvailabilityService {
         const overlaps = parsedAppointments.some((apt) => {
           const aptStartWithBuffer = apt.startMinutes - buffer;
           const aptEndWithBuffer = apt.endMinutes + buffer;
-          return slotStartMinutes < aptEndWithBuffer && slotEndMinutes > aptStartWithBuffer;
+          return intervalsOverlap(slotStartMinutes, slotEndMinutes, aptStartWithBuffer, aptEndWithBuffer);
         });
 
         if (overlaps) {
@@ -427,6 +311,7 @@ export class AvailabilityService {
       currentMinutes += step;
     }
 
+    const hasAvailable = rawSlots.some((s) => s.available);
     const finalSlots = excludeUnavailable
       ? rawSlots.filter((s) => s.available)
       : rawSlots;
@@ -438,6 +323,12 @@ export class AvailabilityService {
       slots: finalSlots,
       workingHours: dayWorkingHours,
       clinicOpen: true,
+      isOpen: true,
+      status: hasAvailable ? 'OPEN' : 'NO_AVAILABLE_SLOTS',
+      message: hasAvailable
+        ? 'Slots available'
+        : 'No available appointment slots for this doctor on this date.',
+      scheduleSource: effectiveSchedule.scheduleSource,
     };
   }
 }

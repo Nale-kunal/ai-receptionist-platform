@@ -20,6 +20,8 @@ function makeMockService() {
     rescheduleAppointment:  jest.fn(),
     cancelAppointment:      jest.fn(),
     confirmAppointment:     jest.fn(),
+    checkInAppointment:   jest.fn(),
+    startAppointment:     jest.fn(),
     completeAppointment:    jest.fn(),
     markNoShow:             jest.fn(),
     getAppointmentById:     jest.fn(),
@@ -192,6 +194,36 @@ describe('AppointmentController', () => {
       await controller.cancelAppointment(req, res, next);
 
       expect(res.status).toHaveBeenCalledWith(200);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // checkInAppointment & startAppointment
+  // -------------------------------------------------------------------------
+
+  describe('checkInAppointment', () => {
+    it('should return 200 on valid check-in request', async () => {
+      mockService.checkInAppointment.mockResolvedValue(makeApptResponse());
+      const { res } = makeRes();
+      const req = makeReq({ params: { id: APPT_ID } });
+
+      await controller.checkInAppointment(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(mockService.checkInAppointment).toHaveBeenCalledWith(APPT_ID, TENANT_ID, 'actor-1', 'req-1');
+    });
+  });
+
+  describe('startAppointment', () => {
+    it('should return 200 on valid start request', async () => {
+      mockService.startAppointment.mockResolvedValue(makeApptResponse());
+      const { res } = makeRes();
+      const req = makeReq({ params: { id: APPT_ID } });
+
+      await controller.startAppointment(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect(mockService.startAppointment).toHaveBeenCalledWith(APPT_ID, TENANT_ID, 'actor-1', 'req-1');
     });
   });
 

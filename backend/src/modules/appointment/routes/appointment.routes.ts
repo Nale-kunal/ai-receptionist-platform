@@ -93,6 +93,22 @@ export function createAppointmentRouter(deps: AppointmentRouterDeps): Router {
     controller.confirmAppointment,
   );
 
+  // 6a. Check-in appointment
+  router.post('/:id/check-in',
+    authenticate,
+    resolveTenant,
+    requireUpdate,
+    controller.checkInAppointment,
+  );
+
+  // 6b. Start consultation (in progress)
+  router.post('/:id/start',
+    authenticate,
+    resolveTenant,
+    requireUpdate,
+    controller.startAppointment,
+  );
+
   // 7. Cancel appointment
   router.post('/:id/cancel',
     authenticate,

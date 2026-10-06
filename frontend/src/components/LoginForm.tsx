@@ -10,6 +10,7 @@ interface LoginFormProps {
   isLoading: boolean;
   onForgotPasswordClick: () => void;
   onRegisterClick?: () => void;
+  defaultEmail?: string;
 }
 
 export const LoginForm: React.FC<LoginFormProps> = ({
@@ -17,8 +18,10 @@ export const LoginForm: React.FC<LoginFormProps> = ({
   isLoading,
   onForgotPasswordClick,
   onRegisterClick,
+  defaultEmail,
 }) => {
   const [email, setEmail] = useState(() => {
+    if (defaultEmail) return defaultEmail;
     const isOptIn = localStorage.getItem('remember_me_optin') === 'true';
     return isOptIn ? localStorage.getItem('e2e_remembered_email') || '' : '';
   });

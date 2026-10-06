@@ -1,17 +1,23 @@
 /**
  * Admin WhatsApp Controller
  *
- * Full technical management of WhatsApp integrations — ADMIN ONLY.
- * This is the only place where phoneNumberId, wabaId, and webhookVerifyToken
- * can be set or viewed. Clinic users cannot access these fields.
+ * Full technical management of WhatsApp integrations — PLATFORM ADMIN ONLY.
+ *
+ * Responsibilities:
+ *  - Provisioning channels (phone number, Meta Phone Number ID, WABA ID)
+ *  - Pre-activation Meta verification & WABA app subscription
+ *  - Diagnostic connection testing (without modifying state)
+ *  - Activation and deactivation
+ *  - Zero secret exposure in responses or audit logs
  */
 
 import type { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import type { PrismaClient } from '@prisma/client';
 import { adminCache } from '../../shared/admin-cache';
+import { MetaVerificationService } from './meta-verification.service';
 
-const E164 = z.string().regex(/^\+[1-9]\d{7,14}$/, 'Phone must be E.164 format');
+const E164 = z.string().regex(/^\+[1-9]\d{7,14}$/, 'Phone must be in E.164 format (e.g. +919405686422)');
 
 const ProvisionSchema = z.object({
   clinicId: z.string().uuid(),
@@ -19,7 +25,6 @@ const ProvisionSchema = z.object({
   phoneNumberId: z.string().min(1, 'Meta Phone Number ID is required'),
   wabaId: z.string().min(1, 'WABA ID is required'),
   displayName: z.string().min(1).max(120),
-  webhookVerifyToken: z.string().min(8),
   settings: z.record(z.unknown()).optional(),
 });
 
@@ -27,12 +32,18 @@ const UpdateSchema = z.object({
   phoneNumberId: z.string().min(1).optional(),
   wabaId: z.string().min(1).optional(),
   displayName: z.string().min(1).max(120).optional(),
-  webhookVerifyToken: z.string().min(8).optional(),
   settings: z.record(z.unknown()).optional(),
 });
 
 export class AdminWhatsAppController {
-  constructor(private readonly prisma: PrismaClient) {}
+  private readonly metaVerification: MetaVerificationService;
+
+  constructor(
+    private readonly prisma: PrismaClient,
+    metaVerification?: MetaVerificationService,
+  ) {
+    this.metaVerification = metaVerification ?? new MetaVerificationService();
+  }
 
   list = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
@@ -56,7 +67,6 @@ export class AdminWhatsAppController {
         this.prisma.whatsAppIntegration.count({ where }),
       ]);
 
-      // Admin sees ALL fields — no redaction
       res.json({
         success: true,
         data: {
@@ -96,6 +106,30 @@ export class AdminWhatsAppController {
         return;
       }
 
+      // Check for phone number conflicts
+      const existingByPhone = await this.prisma.whatsAppIntegration.findFirst({
+        where: { phoneNumber: body.phoneNumber, deletedAt: null },
+      });
+      if (existingByPhone) {
+        res.status(409).json({
+          success: false,
+          error: { code: 'PHONE_NUMBER_EXISTS', message: `Phone number ${body.phoneNumber} is already provisioned.` },
+        });
+        return;
+      }
+
+      // Check for Phone Number ID conflicts
+      const existingById = await this.prisma.whatsAppIntegration.findFirst({
+        where: { phoneNumberId: body.phoneNumberId, deletedAt: null },
+      });
+      if (existingById) {
+        res.status(409).json({
+          success: false,
+          error: { code: 'PHONE_NUMBER_ID_EXISTS', message: `Meta Phone Number ID ${body.phoneNumberId} is already provisioned.` },
+        });
+        return;
+      }
+
       const integration = await this.prisma.whatsAppIntegration.create({
         data: {
           tenantId: clinic.tenantId,
@@ -104,10 +138,10 @@ export class AdminWhatsAppController {
           phoneNumberId: body.phoneNumberId,
           wabaId: body.wabaId,
           displayName: body.displayName,
-          webhookVerifyToken: body.webhookVerifyToken,
           settings: (body.settings ?? {}) as any,
           status: 'inactive',
           isEnabled: false,
+          wabaSubscribed: false,
         },
       });
 
@@ -121,7 +155,6 @@ export class AdminWhatsAppController {
           entityId: integration.id,
           tenantId: clinic.tenantId,
           clinicId: body.clinicId,
-          // Never log phoneNumberId, wabaId, or webhookVerifyToken in audit metadata
           metadata: { phoneNumber: body.phoneNumber, displayName: body.displayName },
         },
       });
@@ -160,7 +193,7 @@ export class AdminWhatsAppController {
           entityId: id,
           tenantId: integration.tenantId,
           clinicId: integration.clinicId,
-          metadata: { updatedFields: Object.keys(body).filter(k => k !== 'webhookVerifyToken') },
+          metadata: { updatedFields: Object.keys(body) },
         },
       });
 
@@ -174,23 +207,116 @@ export class AdminWhatsAppController {
     }
   };
 
+  /**
+   * Diagnostic connection test without modifying activation status.
+   */
+  testConnection = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { id } = req.params;
+      const integration = await this.prisma.whatsAppIntegration.findFirst({
+        where: { id, deletedAt: null },
+      });
+
+      if (!integration) {
+        res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Integration not found' } });
+        return;
+      }
+
+      const checkResult = await this.metaVerification.runConnectivityCheck({
+        wabaId: integration.wabaId,
+        phoneNumberId: integration.phoneNumberId,
+        phoneNumber: integration.phoneNumber,
+      });
+
+      res.json({
+        success: checkResult.success,
+        data: {
+          status: checkResult.status,
+          checks: checkResult.checks,
+          details: checkResult.details,
+          error: checkResult.error,
+        },
+      });
+    } catch (err) { next(err); }
+  };
+
+  /**
+   * Controlled Activation Workflow:
+   * 1. Validate Meta Credentials
+   * 2. Validate WABA Access
+   * 3. Validate Phone Number ID & E.164 phone
+   * 4. Subscribe WABA to Webhooks
+   * 5. Verify Subscription
+   * 6. Atomically update DB state: isEnabled = true, status = 'active', wabaSubscribed = true
+   */
   activate = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const { id } = req.params;
       const adminId = req.adminUser!.adminId;
 
-      const integration = await this.prisma.whatsAppIntegration.update({
+      const integration = await this.prisma.whatsAppIntegration.findFirst({
+        where: { id, deletedAt: null },
+      });
+
+      if (!integration) {
+        res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Integration not found' } });
+        return;
+      }
+
+      // Run full pre-activation verification pipeline
+      const checkResult = await this.metaVerification.runConnectivityCheck({
+        wabaId: integration.wabaId,
+        phoneNumberId: integration.phoneNumberId,
+        phoneNumber: integration.phoneNumber,
+      });
+
+      if (!checkResult.success) {
+        res.status(422).json({
+          success: false,
+          status: 'verification_failed',
+          checks: checkResult.checks,
+          error: checkResult.error || {
+            code: 'ACTIVATION_VERIFICATION_FAILED',
+            message: 'One or more Meta WhatsApp connectivity checks failed.',
+          },
+        });
+        return;
+      }
+
+      // All external checks passed — activate integration in database
+      const updated = await this.prisma.whatsAppIntegration.update({
         where: { id },
-        data: { isEnabled: true, status: 'active' },
+        data: {
+          isEnabled: true,
+          status: 'active',
+          wabaSubscribed: true,
+        },
       });
 
       adminCache.invalidateAll();
 
       await this.prisma.adminAuditLog.create({
-        data: { adminId, action: 'whatsapp.activate', entityType: 'WhatsAppIntegration', entityId: id, tenantId: integration.tenantId, clinicId: integration.clinicId },
+        data: {
+          adminId,
+          action: 'whatsapp.activate',
+          entityType: 'WhatsAppIntegration',
+          entityId: id,
+          tenantId: integration.tenantId,
+          clinicId: integration.clinicId,
+          metadata: {
+            verifiedName: checkResult.details?.verifiedName,
+            displayPhoneNumber: checkResult.details?.displayPhoneNumber,
+          },
+        },
       });
 
-      res.json({ success: true, data: { integration } });
+      res.json({
+        success: true,
+        status: 'active',
+        checks: checkResult.checks,
+        details: checkResult.details,
+        data: { integration: updated },
+      });
     } catch (err) { next(err); }
   };
 
@@ -207,7 +333,14 @@ export class AdminWhatsAppController {
       adminCache.invalidateAll();
 
       await this.prisma.adminAuditLog.create({
-        data: { adminId, action: 'whatsapp.deactivate', entityType: 'WhatsAppIntegration', entityId: id, tenantId: integration.tenantId, clinicId: integration.clinicId },
+        data: {
+          adminId,
+          action: 'whatsapp.deactivate',
+          entityType: 'WhatsAppIntegration',
+          entityId: id,
+          tenantId: integration.tenantId,
+          clinicId: integration.clinicId,
+        },
       });
 
       res.json({ success: true, data: { integration } });

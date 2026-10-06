@@ -137,9 +137,10 @@ async function runSyncRegressionTest() {
     throw new Error(`Admin API did NOT return CANCELLED status! Returned: ${foundApptCancelled?.status}`);
   }
 
-  // STEP 6: Clean up test appointment
+  // STEP 6: Clean up test appointment and test patient
   await prisma.appointment.delete({ where: { id: appt.id } });
-  console.log(`[Step 6] Test appointment ${appt.id} cleaned up successfully.`);
+  await prisma.patient.delete({ where: { id: patient.id } });
+  console.log(`[Step 6] Test appointment ${appt.id} and test patient ${patient.id} cleaned up successfully.`);
 
   console.log('✅ ALL CROSS-INTERFACE APPOINTMENT SYNC INVARIANTS SATISFIED!');
 }

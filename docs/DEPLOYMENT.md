@@ -30,7 +30,8 @@ Configure the following environment variables in **Render Dashboard → Service 
 | :--- | :--- | :--- |
 | `NODE_ENV` | **Yes** | Set strictly to `production` |
 | `PORT` | **Yes** | Set to `3000` (or leave default if managed by Render) |
-| `DATABASE_URL` | **Yes** | Full PostgreSQL connection URL with SSL, e.g. `postgresql://user:password@host:5432/dbname?sslmode=require` |
+| `DATABASE_URL` | **Yes** | Neon Pooled connection URL with SSL & timeouts, e.g. `postgresql://user:password@ep-xxx-pooler.c-11.us-east-1.aws.neon.tech/neondb?sslmode=require&connect_timeout=15&pool_timeout=15&connection_limit=10` |
+| `DIRECT_URL` | **Yes** | Neon Direct unpooled connection URL for Prisma CLI & migrations, e.g. `postgresql://user:password@ep-xxx.c-11.us-east-1.aws.neon.tech/neondb?sslmode=require&connect_timeout=15` |
 | `JWT_ACCESS_SECRET` | **Yes** | Cryptographically random key (32+ chars). Generate with `openssl rand -hex 32` |
 | `JWT_REFRESH_SECRET` | **Yes** | Cryptographically random key (32+ chars). Generate with `openssl rand -hex 32` |
 | `CALENDAR_ENCRYPTION_SECRET` | **Yes** | Cryptographically random key (32+ chars). Generate with `openssl rand -hex 32` |
@@ -43,12 +44,13 @@ Configure the following environment variables in **Render Dashboard → Service 
 | `APP_NAME` | **Yes** | `"Dental AI Receptionist"` |
 | `FRONTEND_URL` | **Yes** | `https://your-app-name.vercel.app` |
 | `BACKEND_URL` | **Yes** | `https://dental-ai-backend-gy1y.onrender.com` |
-| `WHATSAPP_APP_SECRET` | Optional* | Meta App Secret for X-Hub-Signature-256 HMAC verification |
-| `WHATSAPP_ACCESS_TOKEN` | Optional* | Meta System User permanent access token for Graph API |
+| `WHATSAPP_APP_SECRET` | **Yes\*** | Meta App Secret for X-Hub-Signature-256 HMAC verification |
+| `WHATSAPP_ACCESS_TOKEN` | **Yes\*** | Meta System User permanent access token for Graph API |
+| `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | **Yes\*** | Meta Platform Webhook GET verification handshake secret |
 | `WHATSAPP_API_VERSION` | **Yes** | `v21.0` |
 
-*\* Required when WhatsApp live integration is enabled.*
-*\*\* Required when live email delivery via Resend is enabled.*
+*\* Strictly required in production for WhatsApp live integration.*
+\*\* Required when live email delivery via Resend is enabled.*
 
 > [!NOTE]
 > **Deploying with `EMAIL_PROVIDER=disabled`**:

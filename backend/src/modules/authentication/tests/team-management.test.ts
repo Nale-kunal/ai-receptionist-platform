@@ -30,6 +30,7 @@ describe('Team Management Enterprise IAM Module', () => {
     mockPrisma = {
       user: {
         findFirst: jest.fn(),
+        findUnique: jest.fn().mockResolvedValue({ id: 'actor-1', firstName: 'Owner', lastName: 'Admin' }),
         findMany: jest.fn(),
         count: jest.fn(),
         create: jest.fn(),
@@ -50,6 +51,22 @@ describe('Team Management Enterprise IAM Module', () => {
       },
       userRole: {
         deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      doctor: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: 'doc-1' }),
+        update: jest.fn().mockResolvedValue({ id: 'doc-1' }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      clinic: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'clinic-1' }),
+      },
+      tenant: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'tenant-1', name: 'Test Practice' }),
+      },
+      rbacAuditLog: {
+        create: jest.fn().mockResolvedValue({ id: 'audit-1' }),
       },
       $transaction: jest.fn((cb) => cb(mockPrisma)),
     };
@@ -357,6 +374,7 @@ describe('Team Management Enterprise IAM Module', () => {
       (userRepo.findById as jest.Mock).mockResolvedValue({
         id: targetStaffId,
         tenantId,
+        email: 'staff@example.com',
         role: 'doctor',
         status: 'active',
         tokenVersion: 2,
@@ -364,6 +382,7 @@ describe('Team Management Enterprise IAM Module', () => {
       (userRepo.update as jest.Mock).mockResolvedValue({
         id: targetStaffId,
         tenantId,
+        email: 'staff@example.com',
         role: 'doctor',
         status: 'archived',
         deletedAt: new Date(),
@@ -381,8 +400,9 @@ describe('Team Management Enterprise IAM Module', () => {
         where: { userId: targetStaffId, status: 'active' },
         data: { status: 'revoked' },
       });
-      expect(mockPrisma.userRole.deleteMany).toHaveBeenCalledWith({
-        where: { userId: targetStaffId },
+      expect(mockPrisma.userRole.updateMany).toHaveBeenCalledWith({
+        where: { userId: targetStaffId, isActive: true },
+        data: { revokedAt: expect.any(Date), isActive: false },
       });
     });
   });

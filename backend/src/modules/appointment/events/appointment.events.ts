@@ -9,6 +9,8 @@
 export const EVENT_APPOINTMENT_CREATED     = 'appointment.created'     as const;
 export const EVENT_APPOINTMENT_UPDATED     = 'appointment.updated'     as const;
 export const EVENT_APPOINTMENT_CONFIRMED   = 'appointment.confirmed'   as const;
+export const EVENT_APPOINTMENT_CHECKED_IN  = 'appointment.checked_in'  as const;
+export const EVENT_APPOINTMENT_IN_PROGRESS = 'appointment.in_progress' as const;
 export const EVENT_APPOINTMENT_CANCELLED   = 'appointment.cancelled'   as const;
 export const EVENT_APPOINTMENT_RESCHEDULED = 'appointment.rescheduled' as const;
 export const EVENT_APPOINTMENT_COMPLETED   = 'appointment.completed'   as const;
@@ -57,6 +59,16 @@ export interface AppointmentConfirmedEvent {
   payload: BaseAppointmentEventPayload;
 }
 
+export interface AppointmentCheckedInEvent {
+  type: typeof EVENT_APPOINTMENT_CHECKED_IN;
+  payload: BaseAppointmentEventPayload;
+}
+
+export interface AppointmentInProgressEvent {
+  type: typeof EVENT_APPOINTMENT_IN_PROGRESS;
+  payload: BaseAppointmentEventPayload;
+}
+
 export interface AppointmentCancelledEvent {
   type: typeof EVENT_APPOINTMENT_CANCELLED;
   payload: BaseAppointmentEventPayload & {
@@ -92,6 +104,8 @@ export type AppointmentDomainEvent =
   | AppointmentCreatedEvent
   | AppointmentUpdatedEvent
   | AppointmentConfirmedEvent
+  | AppointmentCheckedInEvent
+  | AppointmentInProgressEvent
   | AppointmentCancelledEvent
   | AppointmentRescheduledEvent
   | AppointmentCompletedEvent

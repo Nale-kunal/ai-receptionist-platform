@@ -2,23 +2,25 @@
  * Appointment Service
  *
  * Implements the complete appointment lifecycle:
- *   - Booking with full availability validation
- *   - Conflict detection
+ *   - Booking with full canonical availability & break validation
+ *   - Conflict detection & atomic double-booking protection
  *   - Status state machine transitions
  *   - Rescheduling (preserves history via audit events)
  *   - Cancellation
  *   - Audit event publishing
  *
- * Business rules enforced here per 09_Appointment_Contract.md:
+ * Business rules enforced here:
  *   1. Tenant isolation on every operation
  *   2. Doctor and patient must belong to the same clinic
  *   3. Clinic must be active (not suspended/deleted)
- *   4. Doctor must be active
- *   5. Patient must be active
- *   6. No overlapping appointments (double booking prohibited)
- *   7. endTime must be after startTime
- *   8. Status transitions validated via state machine
- *   9. Terminal statuses are immutable
+ *   4. Doctor must be active & available (not on leave, not closed)
+ *   5. Entire appointment duration must fall within open working hours
+ *   6. Appointment must NOT overlap lunch/break intervals
+ *   7. Patient must be active
+ *   8. No overlapping appointments (double booking prohibited)
+ *   9. endTime must be after startTime
+ *  10. Status transitions validated via state machine
+ *  11. Terminal statuses are immutable
  */
 
 import type {
@@ -52,6 +54,10 @@ import {
   InvalidAppointmentStatusTransitionError,
   AppointmentAlreadyTerminalError,
   DoctorNotAvailableError,
+  DoctorBreakConflictError,
+  DoctorScheduleClosedError,
+  AppointmentOutsideWorkingHoursError,
+  DoctorOnLeaveError,
   PatientNotActiveError,
   ClinicNotActiveError,
   AppointmentTimeRangeError,
@@ -61,87 +67,42 @@ import {
   EVENT_APPOINTMENT_CREATED,
   EVENT_APPOINTMENT_UPDATED,
   EVENT_APPOINTMENT_CONFIRMED,
+  EVENT_APPOINTMENT_CHECKED_IN,
+  EVENT_APPOINTMENT_IN_PROGRESS,
   EVENT_APPOINTMENT_CANCELLED,
   EVENT_APPOINTMENT_RESCHEDULED,
   EVENT_APPOINTMENT_COMPLETED,
   EVENT_APPOINTMENT_NO_SHOW,
 } from '../events/appointment.events';
+import {
+  validateDoctorAvailability,
+  DoctorAvailabilityResult,
+} from '../../../shared/scheduling/doctorAvailabilityEngine';
 
 // ---------------------------------------------------------------------------
-// Doctor Working Hours Validator Helper
+// Error Dispatcher Helper
 // ---------------------------------------------------------------------------
 
-const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-
-function parseHHmm(timeStr: string): number {
-  const [h, m] = (timeStr || '').split(':').map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
-
-function checkDoctorWorkingHours(
-  workingHours: any,
-  startTime: Date,
-  endTime: Date
-): { valid: boolean; reason?: string } {
-  if (!Array.isArray(workingHours) || workingHours.length === 0) {
-    return { valid: true };
+function throwAvailabilityError(res: DoctorAvailabilityResult): never {
+  switch (res.errorCode) {
+    case 'DOCTOR_BREAK_CONFLICT':
+      throw new DoctorBreakConflictError(res.reason, res.details);
+    case 'DOCTOR_SCHEDULE_CLOSED':
+      throw new DoctorScheduleClosedError(res.reason, res.details);
+    case 'APPOINTMENT_OUTSIDE_WORKING_HOURS':
+      throw new AppointmentOutsideWorkingHoursError(res.reason, res.details);
+    case 'DOCTOR_ON_LEAVE':
+      throw new DoctorOnLeaveError(res.reason, res.details);
+    case 'APPOINTMENT_CONFLICT':
+      throw new AppointmentConflictError(res.reason, res.details);
+    case 'INVALID_TIME_RANGE':
+      throw new AppointmentTimeRangeError(res.reason || 'Invalid appointment time range.');
+    case 'CLINIC_CLOSED':
+      throw new ClinicNotActiveError();
+    case 'DOCTOR_NOT_AVAILABLE':
+    default:
+      throw new DoctorNotAvailableError(res.reason, res.details);
   }
-
-  const dayOfWeekNum = startTime.getDay();
-  const dayName = DAY_NAMES[dayOfWeekNum];
-
-  const matchedDay = workingHours.find((wh: any) => {
-    if (typeof wh.day === 'string' && wh.day.toLowerCase() === dayName) return true;
-    if (typeof wh.dayOfWeek === 'number' && wh.dayOfWeek === dayOfWeekNum) return true;
-    if (
-      typeof wh.dayOfWeek === 'string' &&
-      (wh.dayOfWeek.toLowerCase() === dayName || parseInt(wh.dayOfWeek, 10) === dayOfWeekNum)
-    )
-      return true;
-    return false;
-  });
-
-  if (!matchedDay) {
-    return { valid: false, reason: `Practitioner does not work on ${dayName}s.` };
-  }
-
-  const isOff = matchedDay.isClosed === true || matchedDay.isOff === true || matchedDay.closed === true;
-  if (isOff) {
-    return { valid: false, reason: `Practitioner is off / closed on ${dayName}s.` };
-  }
-
-  const openTime = matchedDay.openTime || matchedDay.startTime || matchedDay.start || '09:00';
-  const closeTime = matchedDay.closeTime || matchedDay.endTime || matchedDay.end || '17:00';
-
-  const startMins = startTime.getHours() * 60 + startTime.getMinutes();
-  const endMins = endTime.getHours() * 60 + endTime.getMinutes();
-
-  const openMins = parseHHmm(openTime);
-  const closeMins = parseHHmm(closeTime);
-
-  if (startMins < openMins || endMins > closeMins) {
-    return {
-      valid: false,
-      reason: `Selected appointment slot is outside practitioner working hours (${openTime} to ${closeTime}).`,
-    };
-  }
-
-  // Validate lunch break (default 12:00 to 13:00)
-  const breakStartStr = matchedDay.breakStart || '12:00';
-  const breakEndStr = matchedDay.breakEnd || '13:00';
-  const breakStartMins = parseHHmm(breakStartStr);
-  const breakEndMins = parseHHmm(breakEndStr);
-
-  if (breakEndMins > breakStartMins) {
-    if (startMins < breakEndMins && endMins > breakStartMins) {
-      return {
-        valid: false,
-        reason: `Selected appointment slot overlaps practitioner lunch break (${breakStartStr} to ${breakEndStr}).`,
-      };
-    }
-  }
-
-  return { valid: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -174,8 +135,10 @@ const ALLOWED_TRANSITIONS: Record<AppointmentStatus, AppointmentStatus[]> = {
   ],
   [APPOINTMENT_STATUS_CHECKED_IN]: [
     APPOINTMENT_STATUS_IN_PROGRESS,
+    APPOINTMENT_STATUS_COMPLETED,
     APPOINTMENT_STATUS_CANCELLED,
     APPOINTMENT_STATUS_NO_SHOW,
+    APPOINTMENT_STATUS_RESCHEDULED,
   ],
   [APPOINTMENT_STATUS_IN_PROGRESS]: [
     APPOINTMENT_STATUS_COMPLETED,
@@ -247,64 +210,111 @@ export class AppointmentService implements IAppointmentService {
       throw new AppointmentOwnershipError();
     }
 
-    // 4. Doctor is active & working hours check
+    // 4. Fetch Doctor Details (status, workingHours, leaves, clinic timezone)
     const doctorDetails = typeof this.repository.getDoctorDetails === 'function'
       ? await this.repository.getDoctorDetails(params.doctorId)
-      : { id: params.doctorId, status: await this.repository.getDoctorStatus(params.doctorId), workingHours: [] };
+      : {
+          id: params.doctorId,
+          status: await this.repository.getDoctorStatus(params.doctorId) || 'active',
+          workingHours: [],
+          leaves: [],
+        };
+
     if (!doctorDetails || doctorDetails.status !== 'active') {
       throw new DoctorNotAvailableError('Practitioner is inactive or unavailable.');
     }
-    const workHoursCheck = checkDoctorWorkingHours(doctorDetails.workingHours, params.startTime, params.endTime);
-    if (!workHoursCheck.valid) {
-      throw new DoctorNotAvailableError(workHoursCheck.reason);
+
+    const resolvedTenantId = params.tenantId || doctorDetails.tenantId;
+    if (!resolvedTenantId) {
+      throw new AppointmentOwnershipError();
     }
 
-    // 5. Patient belongs to clinic & tenant
+    // 5. Authoritative Timezone Resolution
+    const authoritativeTimezone =
+      params.timezone ||
+      doctorDetails.clinic?.timezone ||
+      'UTC';
+
+    // 6. Authoritative Canonical Availability Check (Hours, Breaks, Leaves, Closed Days)
+    const availCheck = validateDoctorAvailability({
+      doctor: doctorDetails,
+      startTime: params.startTime,
+      endTime: params.endTime,
+      timezone: authoritativeTimezone,
+    });
+    if (!availCheck.valid) {
+      throwAvailabilityError(availCheck);
+    }
+
+    // 7. Patient belongs to clinic & tenant
     const patientValid = await this.repository.patientBelongsToClinic(
       params.patientId,
       clinicId!,
-      params.tenantId,
+      resolvedTenantId,
     );
     if (!patientValid) {
       throw new AppointmentOwnershipError();
     }
 
-    // 6. Patient is active
+    // 8. Patient is active
     const patientStatus = await this.repository.getPatientStatus(params.patientId);
     if (patientStatus !== 'active') {
       throw new PatientNotActiveError();
     }
 
-    // 7. Conflict detection
-    const conflicts = await this.repository.findConflicts({
-      doctorId:  params.doctorId,
-      clinicId:  clinicId!,
-      startTime: params.startTime,
-      endTime:   params.endTime,
-    });
-    if (conflicts.length > 0) {
-      throw new AppointmentConflictError();
+    // 9. Atomic Conflict-Safe Persist
+    const rawType = (params.appointmentType || 'routine_checkup').toLowerCase().trim();
+    let finalNotes = params.notes ?? null;
+    if (rawType === 'other' && params.otherReason?.trim()) {
+      const customReasonText = `Reason: ${params.otherReason.trim()}`;
+      finalNotes = finalNotes ? `${customReasonText}\n\nNotes: ${finalNotes}` : customReasonText;
     }
 
-    // 8. Persist
-    const created = await this.repository.create({
-      tenantId:  params.tenantId,
-      clinicId:  clinicId!,
-      doctorId:  params.doctorId,
-      patientId: params.patientId,
-      startTime: params.startTime,
-      endTime:   params.endTime,
-      timezone:  params.timezone,
-      status:    APPOINTMENT_STATUS_SCHEDULED,
-      source:    params.source,
-      appointmentType: params.appointmentType ?? 'checkup',
-      durationMinutes: params.durationMinutes ?? 30,
-      notes:     params.notes,
-    });
+    const created = typeof this.repository.createWithAtomicConflictCheck === 'function'
+      ? await this.repository.createWithAtomicConflictCheck({
+          tenantId:  resolvedTenantId,
+          clinicId:  clinicId!,
+          doctorId:  params.doctorId,
+          patientId: params.patientId,
+          startTime: params.startTime,
+          endTime:   params.endTime,
+          timezone:  authoritativeTimezone,
+          status:    APPOINTMENT_STATUS_SCHEDULED,
+          source:    params.source,
+          appointmentType: rawType,
+          durationMinutes: params.durationMinutes ?? 30,
+          notes:     finalNotes,
+        })
+      : await (async () => {
+          const conflicts = await this.repository.findConflicts({
+            tenantId:  params.tenantId,
+            doctorId:  params.doctorId,
+            clinicId:  clinicId!,
+            startTime: params.startTime,
+            endTime:   params.endTime,
+          });
+          if (conflicts.length > 0) {
+            throw new AppointmentConflictError();
+          }
+          return this.repository.create({
+            tenantId:  params.tenantId,
+            clinicId:  clinicId!,
+            doctorId:  params.doctorId,
+            patientId: params.patientId,
+            startTime: params.startTime,
+            endTime:   params.endTime,
+            timezone:  authoritativeTimezone,
+            status:    APPOINTMENT_STATUS_SCHEDULED,
+            source:    params.source,
+            appointmentType: rawType,
+            durationMinutes: params.durationMinutes ?? 30,
+            notes:     finalNotes,
+          });
+        })();
 
     const safe = this.toSafe(created);
 
-    // 9. Publish audit event
+    // 10. Publish audit event
     await this.publisher.publish({
       type: EVENT_APPOINTMENT_CREATED,
       payload: {
@@ -377,29 +387,36 @@ export class AppointmentService implements IAppointmentService {
     // Must be in a state that allows rescheduling
     this.assertTransitionAllowed(existing.status, APPOINTMENT_STATUS_RESCHEDULED);
 
-    // Doctor details & working hours check on reschedule
+    // Fetch Doctor Details & Authoritative Timezone
     const doctorDetails = typeof this.repository.getDoctorDetails === 'function'
       ? await this.repository.getDoctorDetails(existing.doctorId)
-      : { id: existing.doctorId, status: await this.repository.getDoctorStatus(existing.doctorId), workingHours: [] };
+      : {
+          id: existing.doctorId,
+          status: await this.repository.getDoctorStatus(existing.doctorId) || 'active',
+          workingHours: [],
+          leaves: [],
+        };
+
     if (!doctorDetails || doctorDetails.status !== 'active') {
       throw new DoctorNotAvailableError('Practitioner is inactive or unavailable.');
     }
-    const workHoursCheck = checkDoctorWorkingHours(doctorDetails.workingHours, params.startTime, params.endTime);
-    if (!workHoursCheck.valid) {
-      throw new DoctorNotAvailableError(workHoursCheck.reason);
-    }
 
-    // Conflict detection (excluding self)
-    const conflicts = await this.repository.findConflicts({
-      tenantId:  existing.tenantId,
-      doctorId:  existing.doctorId,
-      clinicId:  existing.clinicId,
+    const authoritativeTimezone =
+      params.timezone ||
+      existing.timezone ||
+      doctorDetails.clinic?.timezone ||
+      'UTC';
+
+    // Canonical Availability Check on Reschedule (Excluding Self)
+    const availCheck = validateDoctorAvailability({
+      doctor: doctorDetails,
       startTime: params.startTime,
-      endTime:   params.endTime,
-      excludeId: params.id,
+      endTime: params.endTime,
+      timezone: authoritativeTimezone,
+      excludeAppointmentId: params.id,
     });
-    if (conflicts.length > 0) {
-      throw new AppointmentConflictError();
+    if (!availCheck.valid) {
+      throwAvailabilityError(availCheck);
     }
 
     const previousStartTime = existing.startTime;
@@ -409,14 +426,40 @@ export class AppointmentService implements IAppointmentService {
       params.durationMinutes ??
       Math.max(5, Math.round((params.endTime.getTime() - params.startTime.getTime()) / 60000));
 
-    const updated = await this.repository.update(params.id, {
-      startTime:       params.startTime,
-      endTime:         params.endTime,
-      durationMinutes,
-      status:          APPOINTMENT_STATUS_RESCHEDULED,
-      ...(params.timezone !== undefined ? { timezone: params.timezone } : {}),
-      ...(params.notes    !== undefined ? { notes:    params.notes    } : {}),
-    });
+    // Atomic Reschedule with Row Lock
+    const updated = typeof this.repository.rescheduleWithAtomicConflictCheck === 'function'
+      ? await this.repository.rescheduleWithAtomicConflictCheck(params.id, {
+          tenantId:        existing.tenantId,
+          doctorId:        existing.doctorId,
+          clinicId:        existing.clinicId,
+          startTime:       params.startTime,
+          endTime:         params.endTime,
+          durationMinutes,
+          timezone:        authoritativeTimezone,
+          notes:           params.notes,
+        })
+      : await (async () => {
+          const conflicts = await this.repository.findConflicts({
+            tenantId:  existing.tenantId,
+            doctorId:  existing.doctorId,
+            clinicId:  existing.clinicId,
+            startTime: params.startTime,
+            endTime:   params.endTime,
+            excludeId: params.id,
+          });
+          if (conflicts.length > 0) {
+            throw new AppointmentConflictError();
+          }
+          return this.repository.update(params.id, {
+            startTime:       params.startTime,
+            endTime:         params.endTime,
+            durationMinutes,
+            status:          APPOINTMENT_STATUS_RESCHEDULED,
+            ...(params.timezone !== undefined ? { timezone: authoritativeTimezone } : {}),
+            ...(params.notes    !== undefined ? { notes:    params.notes    } : {}),
+          });
+        })();
+
     const safe = this.toSafe(updated);
 
     await this.publisher.publish({
@@ -493,6 +536,72 @@ export class AppointmentService implements IAppointmentService {
 
     await this.publisher.publish({
       type: EVENT_APPOINTMENT_CONFIRMED,
+      payload: {
+        tenantId:      safe.tenantId,
+        clinicId:      safe.clinicId,
+        doctorId:      safe.doctorId,
+        patientId:     safe.patientId,
+        appointmentId: safe.id,
+        actorId,
+        requestId,
+        occurredAt:    new Date(),
+      },
+    });
+
+    return safe;
+  }
+
+  // -------------------------------------------------------------------------
+  // Check-In
+  // -------------------------------------------------------------------------
+
+  public async checkInAppointment(
+    id: string,
+    tenantId: string,
+    actorId: string,
+    requestId: string,
+  ): Promise<SafeAppointment> {
+    const existing = await this.requireAppointment(id, tenantId);
+    this.assertTransitionAllowed(existing.status, APPOINTMENT_STATUS_CHECKED_IN);
+
+    const updated = await this.repository.update(id, { status: APPOINTMENT_STATUS_CHECKED_IN });
+    const safe = this.toSafe(updated);
+
+    await this.publisher.publish({
+      type: EVENT_APPOINTMENT_CHECKED_IN,
+      payload: {
+        tenantId:      safe.tenantId,
+        clinicId:      safe.clinicId,
+        doctorId:      safe.doctorId,
+        patientId:     safe.patientId,
+        appointmentId: safe.id,
+        actorId,
+        requestId,
+        occurredAt:    new Date(),
+      },
+    });
+
+    return safe;
+  }
+
+  // -------------------------------------------------------------------------
+  // Start Consultation (In Progress)
+  // -------------------------------------------------------------------------
+
+  public async startAppointment(
+    id: string,
+    tenantId: string,
+    actorId: string,
+    requestId: string,
+  ): Promise<SafeAppointment> {
+    const existing = await this.requireAppointment(id, tenantId);
+    this.assertTransitionAllowed(existing.status, APPOINTMENT_STATUS_IN_PROGRESS);
+
+    const updated = await this.repository.update(id, { status: APPOINTMENT_STATUS_IN_PROGRESS });
+    const safe = this.toSafe(updated);
+
+    await this.publisher.publish({
+      type: EVENT_APPOINTMENT_IN_PROGRESS,
       payload: {
         tenantId:      safe.tenantId,
         clinicId:      safe.clinicId,

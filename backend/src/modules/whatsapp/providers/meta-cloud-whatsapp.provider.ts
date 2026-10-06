@@ -1,4 +1,4 @@
-﻿/**
+/**
  * MetaCloudWhatsAppProvider
  *
  * Production implementation of IWhatsAppProvider using Meta WhatsApp Cloud API.
@@ -41,6 +41,10 @@ export class MetaCloudWhatsAppProvider implements IWhatsAppProvider {
    * Uses crypto.timingSafeEqual to prevent timing-based side-channel attacks.
    */
   public verifyWebhookSignature(rawBody: Buffer, sigHeader: string): boolean {
+    if (!rawBody || !Buffer.isBuffer(rawBody)) {
+      return false;
+    }
+
     if (!sigHeader || !sigHeader.startsWith('sha256=')) {
       return false;
     }
@@ -181,21 +185,36 @@ export class MetaCloudWhatsAppProvider implements IWhatsAppProvider {
   }
 
   private async metaPost(url: string, body: Record<string, unknown>): Promise<unknown> {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(`Meta API ${response.status}: ${text.slice(0, 200)}`);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        // Sanitize error string: never expose access tokens
+        const sanitizedText = text.replace(/EA[A-Za-z0-9]+/g, '[REDACTED]').slice(0, 200);
+        throw new Error(`Meta API ${response.status}: ${sanitizedText}`);
+      }
+
+      return response.json();
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        throw new Error('Meta API request timed out after 10000ms');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    return response.json();
   }
 }
 

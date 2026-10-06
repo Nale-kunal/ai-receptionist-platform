@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import type { InvitationService } from '../services/invitation.service';
 import { AuthError } from '../errors/auth.errors';
+import { UserRepository } from '../repositories/user.repository';
 
 // ---------------------------------------------------------------------------
 // Validation Schemas
@@ -49,7 +50,27 @@ export const ListInvitationsQuerySchema = z.object({
 // Controller
 // ---------------------------------------------------------------------------
 
+interface CachedInvitations {
+  payload: any;
+  expiresAt: number;
+}
+
 export class InvitationController {
+  private static invitationCache = new Map<string, CachedInvitations>();
+  private static readonly TTL_MS = 15000; // 15-second micro-cache
+
+  public static invalidateCache(tenantId?: string): void {
+    if (tenantId) {
+      for (const key of InvitationController.invitationCache.keys()) {
+        if (key.startsWith(tenantId)) {
+          InvitationController.invitationCache.delete(key);
+        }
+      }
+    } else {
+      InvitationController.invitationCache.clear();
+    }
+  }
+
   constructor(private readonly service: InvitationService) {}
 
   /** POST /invitations */
@@ -95,6 +116,7 @@ export class InvitationController {
         notes: parsed.data.notes,
       });
 
+      InvitationController.invalidateCache(tenantId);
       res.status(201).json({
         success: true,
         data: {
@@ -126,10 +148,10 @@ export class InvitationController {
     }
   };
 
-  /** GET /invitations/validate?token= */
+  /** GET /invitations/validate?token= or GET /invitations/:token */
   public validate = async (req: Request, res: Response, _next: NextFunction): Promise<void> => {
     try {
-      const token = req.query['token'] as string;
+      const token = (req.query['token'] as string) || req.params['token'];
       if (!token) {
         res.status(400).json({
           success: false,
@@ -153,6 +175,11 @@ export class InvitationController {
     }
   };
 
+  /** GET /invitations/:token */
+  public getByToken = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    return this.validate(req, res, next);
+  };
+
   /** POST /invitations/accept */
   public accept = async (req: Request, res: Response, _next: NextFunction): Promise<void> => {
     try {
@@ -172,7 +199,23 @@ export class InvitationController {
         return;
       }
 
-      const user = await this.service.acceptInvitation(parsed.data);
+      const actorUserId =
+        req.user?.userId ||
+        (req as any).user?.id ||
+        req.context?.user?.userId ||
+        (req as any).userId;
+      const actorEmail =
+        req.user?.email ||
+        (req as any).user?.email ||
+        req.context?.user?.email;
+
+      const user = await this.service.acceptInvitation({
+        ...parsed.data,
+        actorUserId,
+        actorEmail,
+      });
+      InvitationController.invalidateCache();
+      UserRepository.invalidateRelationCache(user.id);
       res.status(201).json({ success: true, data: user });
     } catch (err: any) {
       if (err instanceof AuthError || (err.statusCode && err.code)) {
@@ -189,11 +232,30 @@ export class InvitationController {
         });
         return;
       }
-      res.status(400).json({
+      // Catch Prisma transaction timeout or connection pool exhaustion
+      if (
+        err.message &&
+        (err.message.includes('Transaction') ||
+          err.message.includes('timeout') ||
+          err.message.includes('timed out') ||
+          err.message.includes('expired transaction'))
+      ) {
+        console.error('[InvitationController] Database transaction timeout during accept:', err);
+        res.status(503).json({
+          success: false,
+          error: {
+            code: 'DATABASE_TIMEOUT',
+            message: 'The server was unable to complete the transaction in time. Please try again.',
+          },
+        });
+        return;
+      }
+      console.error('[InvitationController] Unexpected error accepting invitation:', err);
+      res.status(500).json({
         success: false,
         error: {
-          code: 'ACCEPTANCE_FAILED',
-          message: err.message || 'Invitation acceptance failed.',
+          code: 'DATABASE_ERROR',
+          message: 'An unexpected error occurred while processing the invitation. Please try again.',
         },
       });
     }
@@ -227,10 +289,31 @@ export class InvitationController {
         return;
       }
 
+      const cacheKey = `${tenantId}:list:${parsed.data.status}:${parsed.data.page}:${parsed.data.limit}`;
+      const now = Date.now();
+      const cached = InvitationController.invitationCache.get(cacheKey);
+      if (cached && cached.expiresAt > now) {
+        if (typeof res.setHeader === 'function') {
+          res.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate');
+          res.setHeader('Server-Timing', 'cache;desc="HIT"');
+        }
+        res.status(200).json({ success: true, data: cached.payload });
+        return;
+      }
+
       const result = await this.service.listInvitations({
         tenantId,
         ...parsed.data,
       });
+
+      InvitationController.invitationCache.set(cacheKey, {
+        payload: result,
+        expiresAt: now + InvitationController.TTL_MS,
+      });
+
+      if (typeof res.setHeader === 'function') {
+        res.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate');
+      }
       res.status(200).json({ success: true, data: result });
     } catch (err) {
       next(err);
@@ -249,7 +332,27 @@ export class InvitationController {
         return;
       }
 
+      const cacheKey = `${tenantId}:stats`;
+      const now = Date.now();
+      const cached = InvitationController.invitationCache.get(cacheKey);
+      if (cached && cached.expiresAt > now) {
+        if (typeof res.setHeader === 'function') {
+          res.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate');
+          res.setHeader('Server-Timing', 'cache;desc="HIT"');
+        }
+        res.status(200).json({ success: true, data: cached.payload });
+        return;
+      }
+
       const stats = await this.service.getInvitationStats(tenantId);
+      InvitationController.invitationCache.set(cacheKey, {
+        payload: stats,
+        expiresAt: now + InvitationController.TTL_MS,
+      });
+
+      if (typeof res.setHeader === 'function') {
+        res.setHeader('Cache-Control', 'private, no-cache, max-age=0, must-revalidate');
+      }
       res.status(200).json({ success: true, data: stats });
     } catch (err) {
       next(err);
@@ -276,6 +379,7 @@ export class InvitationController {
       }
 
       await this.service.revokeInvitation(id, tenantId, userId);
+      InvitationController.invalidateCache(tenantId);
       res.status(200).json({ success: true, data: { revoked: true } });
     } catch (err: any) {
       if (err instanceof AuthError || (err.statusCode && err.code)) {
@@ -299,6 +403,11 @@ export class InvitationController {
         req.context?.user?.userId ||
         (req as any).userId;
       const id = req.params['id']!;
+      const clientKey = (
+        req.headers['idempotency-key'] ||
+        req.headers['x-idempotency-key'] ||
+        req.body?.idempotencyKey
+      ) as string | undefined;
 
       if (!tenantId || !userId) {
         res.status(400).json({
@@ -308,7 +417,8 @@ export class InvitationController {
         return;
       }
 
-      const result = await this.service.resendInvitation(id, tenantId, userId);
+      const result = await this.service.resendInvitation(id, tenantId, userId, clientKey);
+      InvitationController.invalidateCache(tenantId);
       res.status(200).json({
         success: true,
         data: {
@@ -338,6 +448,7 @@ export class InvitationController {
   public decline = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const token = req.body?.token || (req.query?.token as string);
+      const reason = req.body?.reason;
       const userId = req.user?.userId || (req as any).user?.id || req.context?.user?.userId;
 
       if (!token) {
@@ -348,8 +459,25 @@ export class InvitationController {
         return;
       }
 
-      await this.service.declineInvitation(token, userId);
-      res.status(200).json({ success: true, data: { declined: true } });
+      if (reason !== undefined && reason !== null && typeof reason !== 'string') {
+        res.status(422).json({
+          success: false,
+          error: { code: 'VALIDATION_FAILED', message: 'Decline reason must be a string.' },
+        });
+        return;
+      }
+
+      if (typeof reason === 'string' && reason.length > 500) {
+        res.status(422).json({
+          success: false,
+          error: { code: 'VALIDATION_FAILED', message: 'Decline reason cannot exceed 500 characters.' },
+        });
+        return;
+      }
+
+      const result = await this.service.declineInvitation(token, userId, reason);
+      InvitationController.invalidateCache();
+      res.status(200).json({ success: true, data: { declined: true, invitation: result } });
     } catch (err: any) {
       if (err instanceof AuthError || (err.statusCode && err.code)) {
         res.status(err.statusCode || 400).json({
