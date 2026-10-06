@@ -44,11 +44,16 @@ export function isDbConnectivityError(err: unknown): boolean {
   if (!err) return false;
   const message = (err as any)?.message || String(err);
   const code = (err as any)?.code;
+  const name = (err as any)?.name;
   return (
+    name === 'PrismaClientInitializationError' ||
+    code === 'P1000' || // Authentication failed against database server
     code === 'P1001' || // Can't reach database server
     code === 'P1002' || // Database server timeout
+    code === 'P1008' || // Operations timed out
     code === 'P1017' || // Server closed connection
     code === 'P2024' || // Timed out fetching connection from pool
+    message.includes('Authentication failed against database server') ||
     message.includes("Can't reach database server") ||
     message.includes('Connection terminated') ||
     message.includes('Connection lost') ||

@@ -53,7 +53,9 @@ import {
   InvalidVerificationTokenError,
   EmailAlreadyVerifiedError,
   UserNotFoundError,
+  DatabaseTimeoutError,
 } from '../errors/auth.errors';
+import { isDbConnectivityError } from '../../../shared/email/queue/MailQueueService';
 
 import type { UserRepository } from '../repositories/user.repository';
 import type { SessionRepository } from '../repositories/session.repository';
@@ -246,7 +248,17 @@ export class AuthService implements IAuthService {
     const { email, password, deviceInfo, requestId } = params;
 
     // Step 1 — Find user (timing-safe: always run password check even if user not found)
-    const user = await this.userRepository.findByEmail(email);
+    let user;
+    try {
+      user = await this.userRepository.findByEmail(email);
+    } catch (dbErr: any) {
+      if (isDbConnectivityError(dbErr)) {
+        throw new DatabaseTimeoutError(
+          'The database service is temporarily unavailable. Please verify database connection credentials or retry shortly.'
+        );
+      }
+      throw dbErr;
+    }
 
     // Step 2 — Verify password (timing-safe — always hash even for dummy)
     // This prevents timing attacks that reveal whether an email exists.

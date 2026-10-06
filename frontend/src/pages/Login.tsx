@@ -30,6 +30,17 @@ export const Login: React.FC = () => {
     }
   }, [isForce, user, logout]);
 
+  // Non-blocking pre-warm ping to wake up sleeping cloud instances (Render/Neon) on mount
+  React.useEffect(() => {
+    try {
+      const rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000/api/v1';
+      const healthUrl = rawApiUrl.replace(/\/api\/v1\/?$/, '/health');
+      fetch(healthUrl, { method: 'GET', mode: 'cors' }).catch(() => {});
+    } catch {
+      // Ignore background pre-warm failures
+    }
+  }, []);
+
   const handleLoginSubmit = async (email: string, pass: string) => {
     setLoading(true);
     try {

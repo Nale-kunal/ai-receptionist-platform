@@ -58,7 +58,42 @@ export const LoginForm: React.FC<LoginFormProps> = ({
       }
       await onSubmit(email, password);
     } catch (err: any) {
-      const msg = err.response?.data?.error?.message || err.message || 'Login failed. Please try again.';
+      let msg = 'Login failed. Please try again.';
+      const isTimeout =
+        err?.code === 'ECONNABORTED' ||
+        (typeof err?.message === 'string' && err.message.toLowerCase().includes('timeout'));
+      const isNetwork =
+        err?.code === 'ERR_NETWORK' ||
+        (typeof err?.message === 'string' && err.message.toLowerCase().includes('network error'));
+      const serverCode = err?.response?.data?.error?.code;
+      const serverMsg = err?.response?.data?.error?.message;
+      const status = err?.response?.status;
+
+      if (isTimeout) {
+        msg =
+          'The server is taking longer than usual to respond. The cloud service may be waking up from cold start — please wait a moment and try signing in again.';
+      } else if (
+        status === 503 ||
+        serverCode === 'DATABASE_UNAVAILABLE' ||
+        serverCode === 'DATABASE_TIMEOUT' ||
+        (serverMsg && serverMsg.toLowerCase().includes('database'))
+      ) {
+        msg =
+          'The database service is temporarily unavailable or reconnecting. Please verify database connection credentials in your deployment settings or try again shortly.';
+      } else if (isNetwork) {
+        msg = 'Unable to reach the server. Please check your internet connection or verify the backend service is running.';
+      } else if (status === 401 || serverCode === 'AUTH_INVALID_CREDENTIALS') {
+        msg = 'Invalid email address or password. Please check your credentials and try again.';
+      } else if (status === 429) {
+        msg = 'Too many login attempts. Please wait a minute before trying again.';
+      } else if (status === 403 && (serverCode === 'CLINIC_SUSPENDED' || serverCode === 'TENANT_SUSPENDED')) {
+        msg = 'Clinic access has been suspended. Please contact your platform administrator.';
+      } else if (serverMsg) {
+        msg = serverMsg;
+      } else if (err?.message && !err.message.toLowerCase().includes('timeout')) {
+        msg = err.message;
+      }
+
       setGeneralError(msg);
     }
   };
@@ -69,15 +104,20 @@ export const LoginForm: React.FC<LoginFormProps> = ({
         <div
           style={{
             padding: '12px 16px',
-            backgroundColor: 'var(--error-light)',
-            color: 'var(--error)',
-            borderRadius: 'var(--radius)',
+            backgroundColor: 'var(--error-light, rgba(239, 68, 68, 0.1))',
+            color: 'var(--error, #ef4444)',
+            borderRadius: 'var(--radius, 8px)',
             fontSize: '0.875rem',
-            border: '1px solid var(--error)',
+            lineHeight: '1.4',
+            border: '1px solid var(--error, #ef4444)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '4px',
           }}
           role="alert"
         >
-          {generalError}
+          <div style={{ fontWeight: 600 }}>Sign-In Notice</div>
+          <div>{generalError}</div>
         </div>
       )}
 

@@ -47,7 +47,7 @@ import { createDashboardRoutes } from './modules/dashboard/dashboard.routes';
 import type { TokenServiceConfig } from './modules/authentication/services/token.service';
 import type { AuthEmailProvider } from './modules/authentication/services/auth.service';
 import { EmailProviderFactory } from './shared/email/EmailProviderFactory';
-import { MailQueueService } from './shared/email/queue/MailQueueService';
+import { MailQueueService, isDbConnectivityError } from './shared/email/queue/MailQueueService';
 import { EmailService } from './shared/email/EmailService';
 import { EmailServiceAdapter } from './shared/email/EmailServiceAdapter';
 
@@ -722,7 +722,7 @@ async function bootstrap(): Promise<void> {
 
   // Global error handler
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    const status = (err as any)?.status ?? (err as any)?.statusCode ?? 500;
+    let status = (err as any)?.status ?? (err as any)?.statusCode ?? 500;
     
     // Log the error internally (global redaction filter intercepts and sanitizes)
     console.error('[backend] Unhandled error:', err);
@@ -731,14 +731,18 @@ async function bootstrap(): Promise<void> {
     let code = 'INTERNAL_ERROR';
     let details: any[] = [];
 
-    // Safe error message exposure for client errors (status < 500)
-    if (status < 500) {
+    // Catch database connectivity / initialization errors gracefully
+    if (isDbConnectivityError(err)) {
+      status = 503;
+      code = 'DATABASE_UNAVAILABLE';
+      message = 'Database service is temporarily unavailable or reconnecting. Please try again shortly.';
+    } else if (status < 500 || status === 503) {
       if (err instanceof Error) {
         message = err.message;
       } else if (typeof err === 'string') {
         message = err;
       }
-      code = (err as any)?.code ?? 'BAD_REQUEST';
+      code = (err as any)?.code ?? (status === 503 ? 'SERVICE_UNAVAILABLE' : 'BAD_REQUEST');
       details = (err as any)?.details ?? [];
     }
 

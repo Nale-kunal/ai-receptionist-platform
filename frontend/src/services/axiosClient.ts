@@ -7,7 +7,7 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api/v1';
 export const axiosClient = axios.create({
   baseURL: API_URL,
   withCredentials: true, // critical for HttpOnly cookies (refresh_token)
-  timeout: 10000,
+  timeout: 30000, // 30s default timeout to handle cloud cold starts and network latency
   validateStatus: (status) => (status >= 200 && status < 300) || status === 304,
   headers: {
     'Content-Type': 'application/json',
@@ -19,6 +19,16 @@ import { telemetry } from './telemetry';
 // Request Interceptor: Attach bearer token, correlation headers, and start timer
 axiosClient.interceptors.request.use(
   (config) => {
+    // Extend timeout to 45s for authentication operations to accommodate serverless/container cold starts
+    if (
+      config.url?.includes('/auth/login') ||
+      config.url?.includes('/auth/register') ||
+      config.url?.includes('/auth/session') ||
+      config.url?.includes('/auth/refresh')
+    ) {
+      config.timeout = 45000;
+    }
+
     const token = tokenManager.getToken();
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
